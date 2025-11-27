@@ -1,0 +1,59 @@
+{
+    "name": "rejoose/model-counter",
+    "description": "Ultra-efficient model counter package for Laravel with Redis-backed caching and scheduled DB syncing",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "laravel",
+        "counter",
+        "analytics",
+        "redis",
+        "cache",
+        "statistics"
+    ],
+    "authors": [
+        {
+            "name": "Rejoose"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0",
+        "illuminate/redis": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0",
+        "pestphp/pest": "^3.0",
+        "laravel/pint": "^1.13",
+        "phpstan/phpstan": "^1.10"
+    },
+    "scripts": {
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage",
+        "pint": "vendor/bin/pint",
+        "phpstan": "vendor/bin/phpstan analyse"
+    },
+    "autoload": {
+        "psr-4": {
+            "Rejoose\\ModelCounter\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Rejoose\\ModelCounter\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Rejoose\\ModelCounter\\ModelCounterServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    }
+}
