@@ -2,15 +2,15 @@
 
 namespace Rejoose\ModelCounter\Filament\Resources;
 
+use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteAction;
+use Filament\Actions\DeleteBulkAction;
+use Filament\Actions\EditAction;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
-use Filament\Tables\Actions\BulkActionGroup;
-use Filament\Tables\Actions\DeleteAction;
-use Filament\Tables\Actions\DeleteBulkAction;
-use Filament\Tables\Actions\EditAction;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
@@ -22,9 +22,9 @@ class ModelCounterResource extends Resource
 {
     protected static ?string $model = ModelCounter::class;
 
-    public static ?string $navigationIcon = 'heroicon-o-chart-bar';
+    public static string|null|\BackedEnum $navigationIcon = 'heroicon-o-chart-bar';
 
-    public static ?string $navigationGroup = 'Analytics';
+    public static string|null|\UnitEnum $navigationGroup = 'Analytics';
 
     protected static ?string $navigationLabel = 'Model Counters';
 
@@ -184,7 +184,7 @@ class ModelCounterResource extends Resource
                 EditAction::make(),
                 DeleteAction::make(),
             ])
-            ->bulkActions([
+            ->toolbarActions([
                 BulkActionGroup::make([
                     DeleteBulkAction::make(),
                 ]),
