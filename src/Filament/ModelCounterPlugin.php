@@ -59,6 +59,14 @@ class ModelCounterPlugin implements Plugin
     }
 
     /**
+     * Check if the resource is enabled.
+     */
+    public function hasResource(): bool
+    {
+        return $this->hasResource;
+    }
+
+    /**
      * Enable or disable the resource.
      */
     public function resource(bool $condition = true): static

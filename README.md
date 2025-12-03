@@ -1,6 +1,6 @@
 # 📊 Laravel Model Counter
 
-**Ultra-efficient model counting package for Laravel with Redis-backed caching and scheduled database synchronization.**
+**Ultra-efficient model counting package for Laravel with Redis-backed caching, interval-based counting, and scheduled database synchronization.**
 
 Perfect for tracking downloads, views, likes, visits, or any metric that needs to be counted millions of times per day without database bottlenecks.
 
@@ -12,7 +12,10 @@ Perfect for tracking downloads, views, likes, visits, or any metric that needs t
 
 - ⚡ **Blazing Fast**: Uses Redis atomic operations for lightning-fast increments
 - 🔄 **Efficient Sync**: Scheduled batch syncing to database reduces DB load by 99%
+- 📅 **Interval Counting**: Track counts by day, week, month, quarter, or year
+- 🔁 **Safe Recount**: Safely recount values from source data
 - 🎯 **Polymorphic**: Works with any Eloquent model as the "owner"
+- 🖥️ **Filament Integration**: Optional Filament 4 admin panel resource
 - 💪 **Production Ready**: Battle-tested architecture used in high-traffic analytics systems
 - 🧪 **Well Tested**: Comprehensive test coverage
 - 📦 **Zero Config**: Works out of the box with sensible defaults
@@ -23,6 +26,7 @@ Perfect for tracking downloads, views, likes, visits, or any metric that needs t
 - PHP 8.3+
 - Laravel 11.x or 12.x
 - Redis (for caching)
+- Filament 4.x (optional, for admin panel)
 
 ## 📦 Installation
 
@@ -56,16 +60,20 @@ REDIS_PORT=6379
 
 ### Step 5: Schedule Counter Sync
 
-Add this to your `app/Console/Kernel.php`:
+Add this to your `routes/console.php` (Laravel 11+):
+
+```php
+use Illuminate\Support\Facades\Schedule;
+
+Schedule::command('counter:sync')->everyMinute();
+```
+
+Or in `app/Console/Kernel.php` (Laravel 10):
 
 ```php
 protected function schedule(Schedule $schedule): void
 {
-    // Sync every minute for near real-time accuracy
     $schedule->command('counter:sync')->everyMinute();
-    
-    // OR sync every 5 minutes for reduced overhead
-    // $schedule->command('counter:sync')->everyFiveMinutes();
 }
 ```
 
@@ -121,60 +129,265 @@ $user->resetCounter('downloads');
 $user->setCounter('downloads', 1000);
 ```
 
-## 🎯 Use Cases
+## 📅 Interval-Based Counting
 
-### Track Product Downloads
+Track counts across different time periods - perfect for analytics dashboards, rate limiting, and reporting.
+
+### Available Intervals
+
+```php
+use Rejoose\ModelCounter\Enums\Interval;
+
+Interval::Day      // Daily counts
+Interval::Week     // Weekly counts
+Interval::Month    // Monthly counts
+Interval::Quarter  // Quarterly counts
+Interval::Year     // Yearly counts
+```
+
+### Basic Interval Usage
+
+```php
+use Rejoose\ModelCounter\Enums\Interval;
+
+// Increment today's page views
+$user->incrementCounter('page_views', 1, Interval::Day);
+
+// Increment this month's API calls
+$user->incrementCounter('api_calls', 1, Interval::Month);
+
+// Get today's count
+$todayViews = $user->counter('page_views', Interval::Day);
+
+// Get this month's count
+$monthlyApiCalls = $user->counter('api_calls', Interval::Month);
+```
+
+### Interval Counters are Separate
+
+Total counters and interval counters are tracked independently:
+
+```php
+// These are 3 separate counters!
+$user->incrementCounter('downloads');                    // Total (no interval)
+$user->incrementCounter('downloads', 1, Interval::Day);  // Today's count
+$user->incrementCounter('downloads', 1, Interval::Month); // This month's count
+
+$total = $user->counter('downloads');                     // Total downloads
+$today = $user->counter('downloads', Interval::Day);      // Today's downloads
+$thisMonth = $user->counter('downloads', Interval::Month); // This month's downloads
+```
+
+### Get Historical Data
+
+```php
+// Get last 12 months of download counts
+$history = $user->counterHistory('downloads', Interval::Month, 12);
+// Returns: ['2024-12' => 150, '2024-11' => 120, '2024-10' => 95, ...]
+
+// Get last 7 days
+$weeklyHistory = $user->counterHistory('page_views', Interval::Day, 7);
+// Returns: ['2024-12-03' => 50, '2024-12-02' => 45, ...]
+
+// Get last 4 quarters
+$quarterlyHistory = $user->counterHistory('revenue', Interval::Quarter, 4);
+```
+
+### Sum Across All Periods
+
+```php
+// Get total across all months
+$allTimeMonthlySum = $user->counterSum('downloads', Interval::Month);
+```
+
+## 🔁 Recount Functionality
+
+Safely recalculate counters from source data - perfect for data migrations, corrections, or periodic reconciliation.
+
+### Basic Recount
+
+```php
+// Recount posts from the database
+$newCount = $user->recountCounter('posts', fn() => $user->posts()->count());
+
+// Recount with relationship
+$newCount = $user->recountCounter('comments', fn() => $user->comments()->count());
+
+// Recount orders for a product
+$newCount = $product->recountCounter('orders', fn() => $product->orders()->count());
+```
+
+### Recount with Intervals
+
+```php
+use Rejoose\ModelCounter\Enums\Interval;
+
+// Recount today's page views
+$user->recountCounter(
+    'page_views',
+    fn() => $user->pageViews()->whereDate('created_at', today())->count(),
+    Interval::Day
+);
+```
+
+### Recount Multiple Periods
+
+Useful for rebuilding historical data:
+
+```php
+use Rejoose\ModelCounter\Enums\Interval;
+use Carbon\Carbon;
+
+// Recount last 12 months of orders
+$results = $user->recountCounterPeriods(
+    'orders',
+    Interval::Month,
+    fn(Carbon $start, Carbon $end) => $user->orders()
+        ->whereBetween('created_at', [$start, $end])
+        ->count(),
+    12 // periods
+);
+
+// Returns: ['2024-12' => 15, '2024-11' => 22, '2024-10' => 18, ...]
+```
+
+### Direct Counter Class Usage
 
 ```php
 use Rejoose\ModelCounter\Counter;
 
+// Simple recount
+$count = Counter::recount($user, 'posts', fn() => $user->posts()->count());
+
+// Recount multiple periods
+$results = Counter::recountPeriods(
+    $user,
+    'api_calls',
+    Interval::Day,
+    fn(Carbon $start, Carbon $end) => ApiLog::query()
+        ->where('user_id', $user->id)
+        ->whereBetween('created_at', [$start, $end])
+        ->count(),
+    30 // last 30 days
+);
+```
+
+## 🎯 Use Cases
+
+### Track Product Downloads with Daily Stats
+
+```php
 class Product extends Model
 {
     use HasCounters;
 }
 
 // When someone downloads
-$product->incrementCounter('downloads');
+$product->incrementCounter('downloads');              // Total
+$product->incrementCounter('downloads', 1, Interval::Day);   // Daily
+$product->incrementCounter('downloads', 1, Interval::Month); // Monthly
 
-// Display download count
-echo "Downloaded {$product->counter('downloads')} times";
+// Display stats
+echo "Total: {$product->counter('downloads')}";
+echo "Today: {$product->counter('downloads', Interval::Day)}";
+echo "This Month: {$product->counter('downloads', Interval::Month)}";
+
+// Get chart data for last 30 days
+$chartData = $product->counterHistory('downloads', Interval::Day, 30);
 ```
 
-### Track User Activity
+### API Rate Limiting
 
 ```php
 class User extends Authenticatable
 {
     use HasCounters;
+    
+    public function checkRateLimit(): bool
+    {
+        $dailyLimit = 1000;
+        $currentUsage = $this->counter('api_calls', Interval::Day);
+        
+        return $currentUsage < $dailyLimit;
+    }
+    
+    public function trackApiCall(): void
+    {
+        $this->incrementCounter('api_calls', 1, Interval::Day);
+        $this->incrementCounter('api_calls', 1, Interval::Month);
+    }
 }
-
-// Track various metrics
-$user->incrementCounter('profile_views');
-$user->incrementCounter('posts_created');
-$user->incrementCounter('comments_made');
-
-// Get user stats
-$stats = $user->counters(['profile_views', 'posts_created', 'comments_made']);
 ```
 
-### Track Organization Metrics
+### Monthly Billing Metrics
 
 ```php
 class Organization extends Model
 {
     use HasCounters;
-}
-
-// Track organization activity
-$org->incrementCounter('api_calls');
-$org->incrementCounter('storage_used', $fileSize);
-$org->incrementCounter('emails_sent');
-
-// Check quotas
-if ($org->counter('api_calls') > $org->api_limit) {
-    throw new QuotaExceededException();
+    
+    public function getMonthlyUsage(): array
+    {
+        return [
+            'api_calls' => $this->counter('api_calls', Interval::Month),
+            'storage_bytes' => $this->counter('storage_used', Interval::Month),
+            'emails_sent' => $this->counter('emails', Interval::Month),
+        ];
+    }
+    
+    public function recalculateUsage(): void
+    {
+        $this->recountCounter(
+            'storage_used',
+            fn() => $this->files()->sum('size'),
+            Interval::Month
+        );
+    }
 }
 ```
+
+## 🖥️ Filament Admin Panel
+
+The package includes an optional Filament 4 resource for managing counters.
+
+### Option 1: Use the Plugin (Recommended)
+
+Register the plugin in your Filament panel provider:
+
+```php
+use Rejoose\ModelCounter\Filament\ModelCounterPlugin;
+
+public function panel(Panel $panel): Panel
+{
+    return $panel
+        // ...
+        ->plugin(
+            ModelCounterPlugin::make()
+                ->navigationGroup('Analytics')        // optional
+                ->navigationIcon('heroicon-o-chart-bar')  // optional
+                ->navigationSort(100)                 // optional
+        );
+}
+```
+
+### Option 2: Publish & Customize
+
+Publish the Filament resources to your app for full customization:
+
+```bash
+php artisan vendor:publish --tag=counter-filament
+```
+
+This copies the resource files to `app/Filament/Resources/` where you can customize them.
+
+### Filament Features
+
+- **Table view** with sortable columns, search, and filters
+- **Filter by**: Interval type, Owner type, Counter key
+- **Badge colors** for different interval types
+- **Navigation badge** showing total counter count
+- **CRUD operations**: Create, Edit, Delete counters
+- **Bulk delete** support
 
 ## 🔧 Advanced Usage
 
@@ -184,23 +397,35 @@ You can use the `Counter` class directly without the trait:
 
 ```php
 use Rejoose\ModelCounter\Counter;
+use Rejoose\ModelCounter\Enums\Interval;
 
 $user = User::find(1);
 
+// Basic operations
 Counter::increment($user, 'downloads', 1);
 Counter::decrement($user, 'credits', 5);
 $count = Counter::get($user, 'downloads');
 Counter::reset($user, 'downloads');
 Counter::set($user, 'downloads', 1000);
+
+// With intervals
+Counter::increment($user, 'views', 1, Interval::Day);
+Counter::get($user, 'views', Interval::Day);
+Counter::history($user, 'views', Interval::Day, 30);
+Counter::sum($user, 'views', Interval::Day);
+
+// Recount
+Counter::recount($user, 'posts', fn() => $user->posts()->count());
 ```
 
-### Batch Operations
+### Delete Counters
 
 ```php
-// Increment multiple related counters
-$product->incrementCounter('downloads');
-$product->incrementCounter('total_bandwidth', $fileSize);
-$product->owner->incrementCounter('total_downloads');
+// Delete a specific counter
+$user->deleteCounter('old_metric');
+
+// Delete all interval records for a counter
+$user->deleteCounter('page_views', Interval::Day);
 ```
 
 ### Manual Sync
@@ -289,11 +514,14 @@ CREATE TABLE model_counters (
     owner_type VARCHAR(255) NOT NULL,
     owner_id BIGINT UNSIGNED NOT NULL,
     key VARCHAR(100) NOT NULL,
+    interval VARCHAR(20) NULL,
+    period_start DATE NULL,
     count BIGINT UNSIGNED DEFAULT 0,
     created_at TIMESTAMP NULL,
     updated_at TIMESTAMP NULL,
-    UNIQUE KEY (owner_type, owner_id, key),
-    INDEX (owner_type, owner_id)
+    UNIQUE KEY (owner_type, owner_id, key, interval, period_start),
+    INDEX (owner_type, owner_id),
+    INDEX (key, interval, period_start)
 );
 ```
 
@@ -332,7 +560,7 @@ If you have millions of unsynchronized counters, adjust the sync frequency:
 
 ```php
 // Sync more frequently
-$schedule->command('counter:sync')->everyThirtySeconds();
+Schedule::command('counter:sync')->everyThirtySeconds();
 ```
 
 ## 🤝 Contributing
@@ -356,4 +584,3 @@ This package is open-sourced software licensed under the [MIT license](LICENSE).
 ---
 
 Made with ❤️ for the Laravel community
-
