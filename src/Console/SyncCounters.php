@@ -29,9 +29,23 @@ class SyncCounters extends Command
         $isDryRun = $this->option('dry-run');
         $pattern = $this->option('pattern');
 
-        $store = Cache::store(config('counter.store'));
+        $storeName = config('counter.store');
+        $store = Cache::store($storeName);
         $prefix = config('counter.prefix');
         $batchSize = config('counter.sync_batch_size', 1000);
+
+        // Check if we're using a supported store for sync
+        if ($storeName === 'array') {
+            $this->info('Using array cache store - sync is not needed.');
+            $this->info('Array cache stores data directly in the database on each operation.');
+
+            return self::SUCCESS;
+        }
+
+        if (! in_array($storeName, ['redis'])) {
+            $this->warn("Cache store '{$storeName}' may not support sync operations.");
+            $this->warn('Consider using Redis for production or array for local development.');
+        }
 
         try {
             // Get Redis connection

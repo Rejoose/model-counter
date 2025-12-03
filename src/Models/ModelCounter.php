@@ -22,7 +22,8 @@ class ModelCounter extends Model
         return [
             'count' => 'integer',
             'interval' => Interval::class,
-            'period_start' => 'date',
+            // period_start is stored as Y-m-d string, not cast to date
+            // to avoid timezone/datetime format issues across databases
         ];
     }
 
@@ -113,22 +114,25 @@ class ModelCounter extends Model
                 'updated_at' => now(),
             ];
 
-            static::insertOrIgnore($data);
+            $inserted = static::insertOrIgnore($data);
 
-            // If insert failed due to race condition, try update again
-            $retryQuery = static::where($whereClause);
-            if ($interval !== null) {
-                $retryQuery->where('interval', $interval->value)
-                          ->where('period_start', $periodStartDate);
-            } else {
-                $retryQuery->whereNull('interval')
-                          ->whereNull('period_start');
+            // If insert failed due to race condition (record was created by another process),
+            // try update again to add the delta
+            if (! $inserted) {
+                $retryQuery = static::where($whereClause);
+                if ($interval !== null) {
+                    $retryQuery->where('interval', $interval->value)
+                              ->where('period_start', $periodStartDate);
+                } else {
+                    $retryQuery->whereNull('interval')
+                              ->whereNull('period_start');
+                }
+
+                $retryQuery->update([
+                    'count' => DB::raw("count + {$amount}"),
+                    'updated_at' => now(),
+                ]);
             }
-
-            $retryQuery->update([
-                'count' => DB::raw("count + {$amount}"),
-                'updated_at' => now(),
-            ]);
         }
     }
 
@@ -141,23 +145,7 @@ class ModelCounter extends Model
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): void {
-        $periodStartDate = null;
-        if ($interval !== null) {
-            $periodStartDate = ($periodStart ?? $interval->periodStart())->toDateString();
-        }
-
-        static::updateOrCreate(
-            [
-                'owner_type' => $owner::class,
-                'owner_id' => $owner->getKey(),
-                'key' => $key,
-                'interval' => $interval?->value,
-                'period_start' => $periodStartDate,
-            ],
-            [
-                'count' => 0,
-            ]
-        );
+        static::setValue($owner, $key, 0, $interval, $periodStart);
     }
 
     /**
@@ -172,21 +160,36 @@ class ModelCounter extends Model
     ): void {
         $periodStartDate = null;
         if ($interval !== null) {
-            $periodStartDate = ($periodStart ?? $interval->periodStart())->toDateString();
+            $periodStartDate = ($periodStart ?? $interval->periodStart())->format('Y-m-d');
         }
 
-        static::updateOrCreate(
-            [
+        // Build query that properly handles NULL values
+        $query = static::where('owner_type', $owner::class)
+            ->where('owner_id', $owner->getKey())
+            ->where('key', $key);
+
+        if ($interval !== null) {
+            $query->where('interval', $interval->value)
+                  ->where('period_start', $periodStartDate);
+        } else {
+            $query->whereNull('interval')
+                  ->whereNull('period_start');
+        }
+
+        $record = $query->first();
+
+        if ($record) {
+            $record->update(['count' => $value]);
+        } else {
+            static::create([
                 'owner_type' => $owner::class,
                 'owner_id' => $owner->getKey(),
                 'key' => $key,
                 'interval' => $interval?->value,
                 'period_start' => $periodStartDate,
-            ],
-            [
                 'count' => $value,
-            ]
-        );
+            ]);
+        }
     }
 
     /**
@@ -217,6 +220,7 @@ class ModelCounter extends Model
         ?Carbon $fromDate = null
     ): array {
         $periodStarts = $interval->previousPeriods($periods, $fromDate);
+        $dateStrings = array_map(fn ($p) => $p->format('Y-m-d'), $periodStarts);
 
         $results = static::where([
             'owner_type' => $owner::class,
@@ -224,7 +228,7 @@ class ModelCounter extends Model
             'key' => $key,
             'interval' => $interval->value,
         ])
-            ->whereIn('period_start', array_map(fn ($p) => $p->toDateString(), $periodStarts))
+            ->whereIn('period_start', $dateStrings)
             ->pluck('count', 'period_start')
             ->toArray();
 
@@ -232,7 +236,7 @@ class ModelCounter extends Model
         $history = [];
         foreach ($periodStarts as $periodStart) {
             $periodKey = $interval->periodKey($periodStart);
-            $dateKey = $periodStart->toDateString();
+            $dateKey = $periodStart->format('Y-m-d');
             $history[$periodKey] = $results[$dateKey] ?? 0;
         }
 

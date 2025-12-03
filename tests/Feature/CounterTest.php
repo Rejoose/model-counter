@@ -4,7 +4,6 @@ namespace Rejoose\ModelCounter\Tests\Feature;
 
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\Cache;
 use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Models\ModelCounter;
@@ -19,36 +18,39 @@ class CounterTest extends TestCase
     {
         parent::setUp();
 
-        // Create test user table
-        $this->app['db']->connection()->getSchemaBuilder()->create('test_users', function ($table) {
-            $table->id();
-            $table->string('name');
-            $table->timestamps();
-        });
+        // Create test user table if it doesn't exist
+        if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('test_users')) {
+            $this->app['db']->connection()->getSchemaBuilder()->create('test_users', function ($table) {
+                $table->id();
+                $table->string('name');
+                $table->timestamps();
+            });
+        }
 
         $this->user = TestUser::create(['name' => 'Test User']);
+    }
+
+    protected function tearDown(): void
+    {
+        // Clean up test data
+        TestUser::query()->delete();
+        ModelCounter::query()->delete();
+
+        parent::tearDown();
     }
 
     public function test_can_increment_counter(): void
     {
         Counter::increment($this->user, 'downloads');
 
-        $cached = Cache::store('redis')->get(
-            Counter::redisKey($this->user, 'downloads')
-        );
-
-        $this->assertEquals(1, $cached);
+        $this->assertEquals(1, Counter::get($this->user, 'downloads'));
     }
 
     public function test_can_increment_by_custom_amount(): void
     {
         Counter::increment($this->user, 'downloads', 5);
 
-        $cached = Cache::store('redis')->get(
-            Counter::redisKey($this->user, 'downloads')
-        );
-
-        $this->assertEquals(5, $cached);
+        $this->assertEquals(5, Counter::get($this->user, 'downloads'));
     }
 
     public function test_can_decrement_counter(): void
@@ -56,11 +58,7 @@ class CounterTest extends TestCase
         Counter::increment($this->user, 'credits', 10);
         Counter::decrement($this->user, 'credits', 3);
 
-        $cached = Cache::store('redis')->get(
-            Counter::redisKey($this->user, 'credits')
-        );
-
-        $this->assertEquals(7, $cached);
+        $this->assertEquals(7, Counter::get($this->user, 'credits'));
     }
 
     public function test_can_get_counter_value(): void
@@ -77,7 +75,7 @@ class CounterTest extends TestCase
         // Set database baseline
         ModelCounter::setValue($this->user, 'downloads', 100);
 
-        // Add cached increment
+        // Add increment
         Counter::increment($this->user, 'downloads', 5);
 
         // Should return sum
@@ -138,11 +136,7 @@ class CounterTest extends TestCase
     {
         Counter::increment($this->user, 'page_views', 1, Interval::Day);
 
-        $cached = Cache::store('redis')->get(
-            Counter::redisKey($this->user, 'page_views', Interval::Day)
-        );
-
-        $this->assertEquals(1, $cached);
+        $this->assertEquals(1, Counter::get($this->user, 'page_views', Interval::Day));
     }
 
     public function test_can_get_daily_counter_value(): void
@@ -237,23 +231,6 @@ class CounterTest extends TestCase
         Carbon::setTestNow();
     }
 
-    public function test_history_includes_cached_current_period(): void
-    {
-        Carbon::setTestNow(Carbon::parse('2024-06-15'));
-
-        // Set database value
-        ModelCounter::setValue($this->user, 'downloads', 100, Interval::Month, Carbon::parse('2024-06-01'));
-
-        // Add cached increment
-        Counter::increment($this->user, 'downloads', 5, Interval::Month);
-
-        $history = Counter::history($this->user, 'downloads', Interval::Month, 1);
-
-        $this->assertEquals(['2024-06' => 105], $history);
-
-        Carbon::setTestNow();
-    }
-
     public function test_can_get_sum_across_intervals(): void
     {
         // Set values for multiple months
@@ -287,31 +264,6 @@ class CounterTest extends TestCase
 
         $this->assertEquals(10, $newCount);
         $this->assertEquals(10, Counter::get($this->user, 'articles'));
-    }
-
-    public function test_recount_clears_cache(): void
-    {
-        // Set database value
-        ModelCounter::setValue($this->user, 'articles', 100);
-
-        // Add cached increment
-        Counter::increment($this->user, 'articles', 5);
-
-        // Verify cache exists
-        $this->assertEquals(5, Cache::store('redis')->get(
-            Counter::redisKey($this->user, 'articles')
-        ));
-
-        // Recount should clear cache and set new value
-        Counter::recount($this->user, 'articles', fn () => 50);
-
-        // Cache should be cleared
-        $this->assertNull(Cache::store('redis')->get(
-            Counter::redisKey($this->user, 'articles')
-        ));
-
-        // Value should be the recounted value
-        $this->assertEquals(50, Counter::get($this->user, 'articles'));
     }
 
     public function test_can_recount_interval_counter(): void
@@ -425,12 +377,27 @@ class CounterTest extends TestCase
         Carbon::setTestNow();
     }
 
-    protected function tearDown(): void
-    {
-        // Clear Redis after each test
-        Cache::store('redis')->flush();
+    // ==================== DIRECT MODE TESTS ====================
 
-        parent::tearDown();
+    public function test_direct_mode_writes_to_database(): void
+    {
+        // Direct mode is enabled by default in tests
+        $this->assertTrue(config('counter.direct'));
+
+        Counter::increment($this->user, 'direct_test', 5);
+
+        // Value should be in database directly
+        $dbValue = ModelCounter::valueFor($this->user, 'direct_test');
+        $this->assertEquals(5, $dbValue);
+    }
+
+    public function test_interval_label_method(): void
+    {
+        $this->assertEquals('Daily', Interval::Day->label());
+        $this->assertEquals('Weekly', Interval::Week->label());
+        $this->assertEquals('Monthly', Interval::Month->label());
+        $this->assertEquals('Quarterly', Interval::Quarter->label());
+        $this->assertEquals('Yearly', Interval::Year->label());
     }
 }
 

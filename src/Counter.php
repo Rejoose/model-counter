@@ -15,8 +15,8 @@ class Counter
     /**
      * Increment a counter for the given owner and key.
      *
-     * This operation is extremely fast as it only touches Redis
-     * using atomic increment operations.
+     * In direct mode, writes immediately to the database.
+     * Otherwise, uses Redis atomic increment for high performance.
      */
     public static function increment(
         Model $owner,
@@ -24,12 +24,21 @@ class Counter
         int $amount = 1,
         ?Interval $interval = null
     ): void {
+        if (config('counter.direct', false)) {
+            ModelCounter::addDelta($owner, $key, $amount, $interval);
+
+            return;
+        }
+
         Cache::store(config('counter.store'))
             ->increment(static::redisKey($owner, $key, $interval), $amount);
     }
 
     /**
      * Decrement a counter for the given owner and key.
+     *
+     * In direct mode, writes immediately to the database.
+     * Otherwise, uses Redis atomic decrement for high performance.
      */
     public static function decrement(
         Model $owner,
@@ -37,6 +46,12 @@ class Counter
         int $amount = 1,
         ?Interval $interval = null
     ): void {
+        if (config('counter.direct', false)) {
+            ModelCounter::addDelta($owner, $key, -$amount, $interval);
+
+            return;
+        }
+
         Cache::store(config('counter.store'))
             ->decrement(static::redisKey($owner, $key, $interval), $amount);
     }
@@ -44,8 +59,8 @@ class Counter
     /**
      * Get the current count for the given owner and key.
      *
-     * Returns the database baseline plus any cached increments
-     * that haven't been synced yet.
+     * In direct mode, returns only the database value.
+     * Otherwise, returns database baseline plus cached increments.
      */
     public static function get(
         Model $owner,
@@ -53,18 +68,23 @@ class Counter
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): int {
+        $dbValue = ModelCounter::valueFor($owner, $key, $interval, $periodStart);
+
+        // In direct mode, all values are in the database
+        if (config('counter.direct', false)) {
+            return $dbValue;
+        }
+
         // For historical periods (not current), only check database
         if ($interval !== null && $periodStart !== null) {
             $currentPeriodStart = $interval->periodStart();
             if (! $periodStart->equalTo($currentPeriodStart)) {
-                return ModelCounter::valueFor($owner, $key, $interval, $periodStart);
+                return $dbValue;
             }
         }
 
         $cacheValue = Cache::store(config('counter.store'))
             ->get(static::redisKey($owner, $key, $interval), 0);
-
-        $dbValue = ModelCounter::valueFor($owner, $key, $interval, $periodStart);
 
         return $dbValue + $cacheValue;
     }
@@ -99,6 +119,11 @@ class Counter
     ): array {
         $history = ModelCounter::history($owner, $key, $interval, $periods, $fromDate);
 
+        // In direct mode, all values are in the database
+        if (config('counter.direct', false)) {
+            return $history;
+        }
+
         // Add current period's cached value
         $currentPeriodKey = $interval->periodKey($fromDate);
         if (isset($history[$currentPeriodKey])) {
@@ -116,6 +141,11 @@ class Counter
     public static function sum(Model $owner, string $key, Interval $interval): int
     {
         $dbSum = ModelCounter::sumForInterval($owner, $key, $interval);
+
+        // In direct mode, all values are in the database
+        if (config('counter.direct', false)) {
+            return $dbSum;
+        }
 
         // Add current period's cached value
         $cacheValue = Cache::store(config('counter.store'))

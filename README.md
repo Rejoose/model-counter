@@ -449,13 +449,16 @@ The `config/counter.php` file contains all configuration options:
 
 ```php
 return [
-    // Cache store (must support atomic operations, Redis recommended)
+    // Cache store: 'redis' (production) or 'array' (testing)
     'store' => env('COUNTER_STORE', 'redis'),
 
-    // Redis key prefix
+    // Direct mode: write directly to DB instead of caching
+    'direct' => env('COUNTER_DIRECT', false),
+
+    // Cache key prefix
     'prefix' => env('COUNTER_PREFIX', 'counter:'),
 
-    // Batch size for sync operations
+    // Batch size for sync operations (Redis only)
     'sync_batch_size' => env('COUNTER_SYNC_BATCH_SIZE', 1000),
 
     // Table name
@@ -467,9 +470,25 @@ return [
 
 ```env
 COUNTER_STORE=redis
+COUNTER_DIRECT=false
 COUNTER_PREFIX=counter:
 COUNTER_SYNC_BATCH_SIZE=1000
 ```
+
+### Direct Mode (Local Development)
+
+For local development without Redis, enable direct mode:
+
+```env
+COUNTER_STORE=array
+COUNTER_DIRECT=true
+```
+
+In direct mode:
+- Increments/decrements write directly to the database
+- No sync command needed
+- Perfect for testing and local development
+- Slightly slower than Redis but simpler setup
 
 ## 🏗️ Architecture
 

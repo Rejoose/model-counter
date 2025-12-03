@@ -48,20 +48,24 @@ return new class extends Migration
     {
         $tableName = config('counter.table_name', 'model_counters');
 
-        // Only run if columns exist
+        // Only run if the interval column exists AND period_index exists
+        // (meaning this migration actually ran up())
         if (! Schema::hasColumn($tableName, 'interval')) {
             return;
         }
 
-        Schema::table($tableName, function (Blueprint $table) {
-            $table->dropIndex('model_counters_period_index');
-            $table->dropUnique('model_counters_unique');
-        });
+        // Check if we need to restore old constraint (only if we modified it)
+        // For fresh installs, the first migration handles the full schema
+        try {
+            Schema::table($tableName, function (Blueprint $table) {
+                $table->dropIndex('model_counters_period_index');
+            });
+        } catch (\Exception $e) {
+            // Index may not exist if this migration didn't run up()
+        }
 
         Schema::table($tableName, function (Blueprint $table) {
-            $table->unique(['owner_type', 'owner_id', 'key'], 'model_counters_unique');
             $table->dropColumn(['interval', 'period_start']);
         });
     }
 };
-

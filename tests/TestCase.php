@@ -2,17 +2,17 @@
 
 namespace Rejoose\ModelCounter\Tests;
 
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Orchestra\Testbench\TestCase as Orchestra;
 use Rejoose\ModelCounter\ModelCounterServiceProvider;
 
 abstract class TestCase extends Orchestra
 {
+    use RefreshDatabase;
+
     protected function setUp(): void
     {
         parent::setUp();
-
-        // Load migrations
-        $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
     }
 
     protected function getPackageProviders($app): array
@@ -20,6 +20,11 @@ abstract class TestCase extends Orchestra
         return [
             ModelCounterServiceProvider::class,
         ];
+    }
+
+    protected function defineDatabaseMigrations(): void
+    {
+        $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
     }
 
     protected function getEnvironmentSetUp($app): void
@@ -32,9 +37,22 @@ abstract class TestCase extends Orchestra
             'prefix' => '',
         ]);
 
-        // Setup Redis for testing
-        $app['config']->set('cache.default', 'redis');
-        $app['config']->set('counter.store', 'redis');
+        // Use array cache with direct mode for testing (no Redis required)
+        $app['config']->set('cache.default', 'array');
+        $app['config']->set('counter.store', 'array');
+        $app['config']->set('counter.direct', true);
+    }
+
+    /**
+     * Configure the test to use Redis instead of array cache.
+     * Useful for testing the Redis-specific sync functionality.
+     */
+    protected function useRedisCache(): void
+    {
+        config([
+            'cache.default' => 'redis',
+            'counter.store' => 'redis',
+            'counter.direct' => false,
+        ]);
     }
 }
-
