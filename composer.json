@@ -23,10 +23,14 @@
         "illuminate/redis": "^11.0|^12.0"
     },
     "require-dev": {
+        "filament/filament": "^4.0",
+        "laravel/pint": "^1.13",
         "orchestra/testbench": "^9.0",
         "pestphp/pest": "^3.0",
-        "laravel/pint": "^1.13",
         "phpstan/phpstan": "^1.10"
+    },
+    "suggest": {
+        "filament/filament": "Required for the Filament admin panel resource (^4.0)"
     },
     "scripts": {
         "test": "vendor/bin/pest",

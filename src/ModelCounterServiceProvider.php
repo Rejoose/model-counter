@@ -31,6 +31,17 @@ class ModelCounterServiceProvider extends ServiceProvider
         // Load migrations
         $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
 
+        // Publish Filament resources
+        $this->publishes([
+            __DIR__ . '/Filament/Resources' => app_path('Filament/Resources'),
+        ], 'counter-filament');
+
+        // Publish everything
+        $this->publishes([
+            __DIR__ . '/../config/counter.php' => config_path('counter.php'),
+            __DIR__ . '/Filament/Resources' => app_path('Filament/Resources'),
+        ], 'counter');
+
         // Register console commands
         if ($this->app->runningInConsole()) {
             $this->commands([
@@ -39,4 +50,3 @@ class ModelCounterServiceProvider extends ServiceProvider
         }
     }
 }
-

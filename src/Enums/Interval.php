@@ -13,6 +13,20 @@ enum Interval: string
     case Year = 'year';
 
     /**
+     * Get a human-readable label for the interval.
+     */
+    public function label(): string
+    {
+        return match ($this) {
+            self::Day => 'Daily',
+            self::Week => 'Weekly',
+            self::Month => 'Monthly',
+            self::Quarter => 'Quarterly',
+            self::Year => 'Yearly',
+        };
+    }
+
+    /**
      * Get the start of the current period for this interval.
      */
     public function periodStart(?Carbon $date = null): Carbon
