@@ -285,6 +285,13 @@ $user->posts()->recount('published_posts');
 
 // Recount with interval
 $user->posts()->recount('posts', Interval::Day);
+
+// Recount last 30 days
+$user->posts()->recount('posts', Interval::Day, 30);
+
+// Recount last 3 months starting from a specific date
+$user->posts()->recount('posts', Interval::Day, 90, now()->subMonth());
+
 ```
 
 ## ⚡ Efficient Querying
