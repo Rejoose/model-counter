@@ -80,7 +80,7 @@ class SyncCounters extends Command
                 return self::SUCCESS;
             }
 
-            $this->info('Found ' . count($keys) . ' counter(s) to sync.');
+            $this->info('Found '.count($keys).' counter(s) to sync.');
             $synced = 0;
             $skipped = 0;
             $errors = 0;
@@ -89,7 +89,7 @@ class SyncCounters extends Command
             $batches = array_chunk($keys, $batchSize);
 
             foreach ($batches as $batchIndex => $batch) {
-                $this->info('Processing batch ' . ($batchIndex + 1) . ' of ' . count($batches) . '...');
+                $this->info('Processing batch '.($batchIndex + 1).' of '.count($batches).'...');
 
                 foreach ($batch as $key) {
                     try {
@@ -176,7 +176,7 @@ class SyncCounters extends Command
                         $synced++;
 
                     } catch (\Exception $e) {
-                        $this->error("Error processing {$key}: " . $e->getMessage());
+                        $this->error("Error processing {$key}: ".$e->getMessage());
                         $errors++;
                     }
                 }
@@ -201,7 +201,7 @@ class SyncCounters extends Command
             return $errors > 0 ? self::FAILURE : self::SUCCESS;
 
         } catch (\Exception $e) {
-            $this->error('Sync failed: ' . $e->getMessage());
+            $this->error('Sync failed: '.$e->getMessage());
 
             return self::FAILURE;
         }
@@ -214,8 +214,8 @@ class SyncCounters extends Command
     {
         // Try common conventions
         $attempts = [
-            "App\\Models\\" . ucfirst($ownerType),
-            "App\\Models\\" . $ownerType,
+            'App\\Models\\'.ucfirst($ownerType),
+            'App\\Models\\'.$ownerType,
             $ownerType, // Already fully qualified
         ];
 

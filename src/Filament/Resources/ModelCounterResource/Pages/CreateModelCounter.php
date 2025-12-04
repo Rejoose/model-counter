@@ -14,4 +14,3 @@ class CreateModelCounter extends CreateRecord
         return $this->getResource()::getUrl('index');
     }
 }
-

@@ -69,7 +69,7 @@ enum Interval: string
             self::Day => $date->format('Y-m-d'),
             self::Week => $date->format('o-W'), // ISO week
             self::Month => $date->format('Y-m'),
-            self::Quarter => $date->format('Y') . '-Q' . $date->quarter,
+            self::Quarter => $date->format('Y').'-Q'.$date->quarter,
             self::Year => $date->format('Y'),
         };
     }
@@ -97,4 +97,3 @@ enum Interval: string
         return $periods;
     }
 }
-

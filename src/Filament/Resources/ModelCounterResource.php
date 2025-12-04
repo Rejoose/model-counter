@@ -211,4 +211,3 @@ class ModelCounterResource extends Resource
         return static::getModel()::count();
     }
 }
-

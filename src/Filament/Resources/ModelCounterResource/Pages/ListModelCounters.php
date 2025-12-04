@@ -17,4 +17,3 @@ class ListModelCounters extends ListRecords
         ];
     }
 }
-

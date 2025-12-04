@@ -272,6 +272,50 @@ $results = Counter::recountPeriods(
 );
 ```
 
+### Recount via Relationship
+
+You can recount directly from a relationship:
+
+```php
+// Recounts 'posts' counter using the posts() relationship count
+$user->posts()->recount();
+
+// Recount with custom counter key
+$user->posts()->recount('published_posts');
+
+// Recount with interval
+$user->posts()->recount('posts', Interval::Day);
+```
+
+## ⚡ Efficient Querying
+
+The package provides scopes to efficiently query models based on their counters without N+1 problems.
+
+### Order By Counter
+
+Sort models by their counter value:
+
+```php
+// Get users with most downloads
+$users = User::orderByCounter('downloads', 'desc')->get();
+
+// Get top 10 active users
+$topUsers = User::orderByCounter('activity_score', 'desc')->take(10)->get();
+```
+
+### With Counter
+
+Add counter values to your model results (as `{key}_count` attribute):
+
+```php
+// Get users with their download count
+$users = User::withCounter('downloads')->get();
+
+foreach ($users as $user) {
+    echo $user->downloads_count; // Efficiently loaded
+}
+```
+
 ## 🎯 Use Cases
 
 ### Track Product Downloads with Daily Stats

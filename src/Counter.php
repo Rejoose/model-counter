@@ -267,14 +267,14 @@ class Counter
         ?Carbon $periodStart = null
     ): string {
         $baseKey = config('counter.prefix')
-            . strtolower(class_basename($owner)) . ':'
-            . $owner->getKey() . ':'
-            . $key;
+            .strtolower(class_basename($owner)).':'
+            .$owner->getKey().':'
+            .$key;
 
         if ($interval !== null) {
             $periodKey = $interval->periodKey($periodStart);
 
-            return $baseKey . ':' . $interval->value . ':' . $periodKey;
+            return $baseKey.':'.$interval->value.':'.$periodKey;
         }
 
         return $baseKey;

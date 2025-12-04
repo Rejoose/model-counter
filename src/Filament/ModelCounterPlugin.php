@@ -106,4 +106,3 @@ class ModelCounterPlugin implements Plugin
         return $this;
     }
 }
-

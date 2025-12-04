@@ -4,6 +4,7 @@ namespace Rejoose\ModelCounter\Traits;
 
 use Carbon\Carbon;
 use Closure;
+use Illuminate\Database\Eloquent\Builder;
 use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
 
@@ -127,5 +128,57 @@ trait HasCounters
     public function deleteCounter(string $key, ?Interval $interval = null): int
     {
         return Counter::delete($this, $key, $interval);
+    }
+
+    /**
+     * Scope the query to include a counter value.
+     */
+    public function scopeWithCounter(Builder $query, string $key): void
+    {
+        $alias = 'counter_'.$key;
+
+        $query->leftJoin("model_counters as {$alias}", function ($join) use ($key, $alias) {
+            $join->on("{$alias}.owner_id", '=', $this->getQualifiedKeyName())
+                ->where("{$alias}.owner_type", '=', $this->getMorphClass())
+                ->where("{$alias}.key", '=', $key)
+                ->whereNull("{$alias}.interval")
+                ->whereNull("{$alias}.period_start");
+        })->addSelect([
+            $this->getTable().'.*',
+            "{$alias}.count as {$key}_count",
+        ]);
+    }
+
+    /**
+     * Scope the query to order by a counter value.
+     */
+    public function scopeOrderByCounter(Builder $query, string $key, string $direction = 'desc'): void
+    {
+        $alias = 'counter_'.$key;
+
+        $joins = $query->getQuery()->joins ?? [];
+        $alreadyJoined = false;
+        foreach ($joins as $join) {
+            if (isset($join->table) && $join->table === "model_counters as {$alias}") {
+                $alreadyJoined = true;
+                break;
+            }
+        }
+
+        if (! $alreadyJoined) {
+            $query->leftJoin("model_counters as {$alias}", function ($join) use ($key, $alias) {
+                $join->on("{$alias}.owner_id", '=', $this->getQualifiedKeyName())
+                    ->where("{$alias}.owner_type", '=', $this->getMorphClass())
+                    ->where("{$alias}.key", '=', $key)
+                    ->whereNull("{$alias}.interval")
+                    ->whereNull("{$alias}.period_start");
+            });
+        }
+
+        if (is_null($query->getQuery()->columns)) {
+            $query->select($this->getTable().'.*');
+        }
+
+        $query->orderBy("{$alias}.count", $direction);
     }
 }

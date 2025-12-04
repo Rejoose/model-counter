@@ -53,10 +53,10 @@ class ModelCounter extends Model
         if ($interval !== null) {
             $periodStart = $periodStart ?? $interval->periodStart();
             $query->where('interval', $interval->value)
-                  ->where('period_start', $periodStart->toDateString());
+                ->where('period_start', $periodStart->toDateString());
         } else {
             $query->whereNull('interval')
-                  ->whereNull('period_start');
+                ->whereNull('period_start');
         }
 
         return $query->value('count') ?? 0;
@@ -89,10 +89,10 @@ class ModelCounter extends Model
 
         if ($interval !== null) {
             $query->where('interval', $interval->value)
-                  ->where('period_start', $periodStartDate);
+                ->where('period_start', $periodStartDate);
         } else {
             $query->whereNull('interval')
-                  ->whereNull('period_start');
+                ->whereNull('period_start');
         }
 
         // Try to update existing record
@@ -122,10 +122,10 @@ class ModelCounter extends Model
                 $retryQuery = static::where($whereClause);
                 if ($interval !== null) {
                     $retryQuery->where('interval', $interval->value)
-                              ->where('period_start', $periodStartDate);
+                        ->where('period_start', $periodStartDate);
                 } else {
                     $retryQuery->whereNull('interval')
-                              ->whereNull('period_start');
+                        ->whereNull('period_start');
                 }
 
                 $retryQuery->update([
@@ -170,10 +170,10 @@ class ModelCounter extends Model
 
         if ($interval !== null) {
             $query->where('interval', $interval->value)
-                  ->where('period_start', $periodStartDate);
+                ->where('period_start', $periodStartDate);
         } else {
             $query->whereNull('interval')
-                  ->whereNull('period_start');
+                ->whereNull('period_start');
         }
 
         $record = $query->first();
