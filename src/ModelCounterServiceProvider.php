@@ -53,7 +53,7 @@ class ModelCounterServiceProvider extends ServiceProvider
         }
 
         // Register relation macro
-        Relation::macro('recount', function (?string $key = null, ?Interval $interval = null) {
+        Relation::macro('recount', function (?string $key = null, ?Interval $interval = null, int $periods = 1, ?\Carbon\Carbon $fromDate = null, string $dateColumn = 'created_at') {
             /** @var Relation $this */
             $model = $this->getParent();
 
@@ -62,6 +62,22 @@ class ModelCounterServiceProvider extends ServiceProvider
             }
 
             $key = $key ?? $this->getRelated()->getTable();
+            $relation = $this;
+
+            if ($interval) {
+                return $model->recountCounterPeriods(
+                    $key,
+                    $interval,
+                    function ($start, $end) use ($dateColumn, $relation) {
+                        return $relation->getQuery()
+                            ->clone()
+                            ->whereBetween($dateColumn, [$start, $end])
+                            ->count();
+                    },
+                    $periods,
+                    $fromDate
+                );
+            }
 
             return $model->recountCounter($key, fn () => $this->count(), $interval);
         });
