@@ -201,7 +201,6 @@ class ModelCounterResource extends Resource
     {
         return [
             'index' => Pages\ListModelCounters::route('/'),
-            'create' => Pages\CreateModelCounter::route('/create'),
             'edit' => Pages\EditModelCounter::route('/{record}/edit'),
         ];
     }
