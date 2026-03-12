@@ -39,7 +39,7 @@ class ModelCounter extends Model
      * Get the current counter value from the database for a given owner and key.
      */
     public static function valueFor(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
@@ -68,7 +68,7 @@ class ModelCounter extends Model
      * Uses upsert for atomic operations with proper MySQL/PostgreSQL compatibility.
      */
     public static function addDelta(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         int $amount,
         ?Interval $interval = null,
@@ -97,7 +97,7 @@ class ModelCounter extends Model
 
         // Try to update existing record
         $updated = $query->update([
-            'count' => DB::raw("count + {$amount}"),
+            'count' => DB::raw('count + '.intval($amount)),
             'updated_at' => now(),
         ]);
 
@@ -129,7 +129,7 @@ class ModelCounter extends Model
                 }
 
                 $retryQuery->update([
-                    'count' => DB::raw("count + {$amount}"),
+                    'count' => DB::raw('count + '.intval($amount)),
                     'updated_at' => now(),
                 ]);
             }
@@ -140,7 +140,7 @@ class ModelCounter extends Model
      * Reset a counter to zero.
      */
     public static function resetValue(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
@@ -152,7 +152,7 @@ class ModelCounter extends Model
      * Set a counter to a specific value.
      */
     public static function setValue(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         int $value,
         ?Interval $interval = null,
@@ -195,7 +195,7 @@ class ModelCounter extends Model
     /**
      * Get all counters for a given owner.
      */
-    public static function allForOwner(\Illuminate\Database\Eloquent\Model $owner): array
+    public static function allForOwner(Model $owner): array
     {
         return static::where([
             'owner_type' => $owner::class,
@@ -213,7 +213,7 @@ class ModelCounter extends Model
      * @return array<string, int> Period key => count
      */
     public static function history(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         Interval $interval,
         int $periods = 12,
@@ -247,7 +247,7 @@ class ModelCounter extends Model
      * Get sum of counts across all periods for an interval-based counter.
      */
     public static function sumForInterval(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         Interval $interval
     ): int {
@@ -263,7 +263,7 @@ class ModelCounter extends Model
      * Delete all counter records for an owner and key.
      */
     public static function deleteFor(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         ?Interval $interval = null
     ): int {

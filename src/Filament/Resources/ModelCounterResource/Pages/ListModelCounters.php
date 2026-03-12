@@ -2,7 +2,6 @@
 
 namespace Rejoose\ModelCounter\Filament\Resources\ModelCounterResource\Pages;
 
-use Filament\Actions\CreateAction;
 use Filament\Resources\Pages\ListRecords;
 use Rejoose\ModelCounter\Filament\Resources\ModelCounterResource;
 
@@ -16,5 +15,3 @@ class ListModelCounters extends ListRecords
         ];
     }
 }
-
-
