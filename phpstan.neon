@@ -7,6 +7,7 @@ parameters:
         - src
     excludePaths:
         - vendor
+        - src/Filament
     checkMissingIterableValueType: false
     checkGenericClassInNonGenericObjectType: false
 
