@@ -14,23 +14,28 @@ Three-phase design:
 2. **Sync** — Scheduled `counter:sync` command batch-upserts Redis deltas to the database, then clears Redis keys
 3. **Read** — Combines DB baseline + Redis delta for accurate current count
 
-Redis key format: `{prefix}{model_type}:{owner_id}:{counter_key}[:interval:period_key]`
+Redis key format: `{prefix}{morph_class}:{owner_id}:{counter_key}[:interval:period_key]`
+
+The morph class uses dot-notation (e.g., `app.models.user`) and respects Laravel's morph map.
 
 ## Directory Structure
 
 ```
 src/
-  Counter.php                  # Main static facade (increment/decrement/get/set/reset/delete)
+  Counter.php                  # Main static facade (increment/decrement/get/set/reset/delete + bulk ops)
   ModelCounterServiceProvider.php  # Service provider, config, migrations, macros
-  Console/SyncCounters.php     # Artisan counter:sync command (Redis→DB)
+  Console/SyncCounters.php     # Artisan counter:sync command (Redis→DB, batch owner loading)
+  Console/PruneCounters.php    # Artisan counter:prune command (retention-based cleanup)
   Enums/Interval.php           # Day/Week/Month/Quarter/Year enum with period calculations
+  Events/                      # CounterIncremented, CounterDecremented, CounterReset, CounterSynced
   Models/ModelCounter.php      # Eloquent model for DB persistence
-  Traits/HasCounters.php       # Trait for models (counter methods + query scopes)
+  Traits/HasCounters.php       # Trait for models (counter methods + query scopes + bulk ops)
   Filament/                    # Optional Filament 4 admin panel integration
-config/counter.php             # Package configuration (store, direct, prefix, batch_size, table_name)
-database/migrations/           # Two migrations: create table + add interval columns
+config/counter.php             # Package configuration (store, direct, prefix, batch_size, table_name, events, retention)
+database/migrations/           # Three migrations: create table, add interval columns, add count index
 tests/
-  Feature/CounterTest.php      # Core functionality tests
+  Feature/CounterTest.php      # Core functionality + key validation + bulk ops + events tests
+  Feature/PruneCountersTest.php    # Prune command tests
   Feature/RecountIntervalTest.php  # Interval recount tests
   Feature/RelationCounterTest.php  # Relation macro + scope tests
   TestCase.php                 # Base test case (SQLite in-memory, array cache, direct mode)
@@ -50,6 +55,16 @@ composer pint              # vendor/bin/pint
 
 # Static analysis (PHPStan level 5)
 composer phpstan           # vendor/bin/phpstan analyse
+```
+
+### Artisan Commands
+
+```bash
+# Sync Redis counters to database
+php artisan counter:sync [--dry-run] [--pattern=]
+
+# Prune old interval counter records
+php artisan counter:prune [--older-than=90] [--interval=day] [--dry-run]
 ```
 
 ## Testing
@@ -81,21 +96,41 @@ Defined in `.github/workflows/`:
 ## Key Patterns
 
 - **Polymorphic ownership:** Counters attach to any Eloquent model via `owner_type`/`owner_id`
+- **Morph map support:** Redis keys and sync command use `getMorphClass()` — configure via `Relation::enforceMorphMap()` for custom namespaces
 - **Interval enum:** `Day`, `Week`, `Month`, `Quarter`, `Year` with `periodKey()` for Redis/DB keys
 - **Direct mode:** Set `COUNTER_DIRECT=true` to bypass Redis and write straight to DB (useful for dev/testing)
-- **Query scopes:** `withCounter()` and `orderByCounter()` use JOINs to avoid N+1
+- **Query scopes:** `withCounter()` and `orderByCounter()` use JOINs to avoid N+1; respects configured table name
 - **Atomic operations:** Redis INCR/DECR for writes; GETDEL during sync; insert-or-update with retry for race conditions
+- **Bulk operations:** `incrementMany()`/`decrementMany()` for batch counter updates
+- **Events:** Opt-in via `counter.events` config — dispatches `CounterIncremented`, `CounterDecremented`, `CounterReset`, `CounterSynced`
+- **Key validation:** Counter keys must be non-empty, no colons, max 100 chars
 - **Recount:** `recount()` and `recountPeriods()` recalculate counters from source data using relationship macros
+- **Pruning:** `counter:prune` command with configurable per-interval retention periods
+- **DB-first safety:** `set()` and `reset()` write to DB before clearing cache to prevent data loss
 
 ## Configuration (config/counter.php)
 
-| Key              | Env Var                | Default          | Description                          |
-|------------------|------------------------|------------------|--------------------------------------|
-| `store`          | `COUNTER_STORE`        | `redis`          | Cache store (redis, array, custom)   |
-| `direct`         | `COUNTER_DIRECT`       | `false`          | Write directly to DB, skip Redis     |
-| `prefix`         | `COUNTER_PREFIX`       | `counter:`       | Redis key prefix                     |
-| `sync_batch_size`| `COUNTER_SYNC_BATCH_SIZE` | `1000`        | Batch size for sync command          |
-| `table_name`     | —                      | `model_counters` | Database table name                  |
+| Key              | Env Var                   | Default          | Description                          |
+|------------------|---------------------------|------------------|--------------------------------------|
+| `store`          | `COUNTER_STORE`           | `redis`          | Cache store (redis, array, custom)   |
+| `direct`         | `COUNTER_DIRECT`          | `false`          | Write directly to DB, skip Redis     |
+| `prefix`         | `COUNTER_PREFIX`          | `counter:`       | Redis key prefix                     |
+| `sync_batch_size`| `COUNTER_SYNC_BATCH_SIZE` | `1000`           | Batch size for sync command          |
+| `table_name`     | —                         | `model_counters` | Database table name                  |
+| `events`         | `COUNTER_EVENTS`          | `false`          | Dispatch counter events              |
+| `retention.day`  | —                         | `90`             | Days to retain daily counter records |
+| `retention.week` | —                         | `365`            | Days to retain weekly records        |
+| `retention.month`| —                         | `null`           | Days to retain monthly (null=forever)|
+| `retention.quarter`| —                       | `null`           | Days to retain quarterly             |
+| `retention.year` | —                         | `null`           | Days to retain yearly                |
+
+## Multi-App Usage
+
+This package is used in `rejoose-app` and `papi`. Key considerations:
+
+- **Redis isolation:** Each app uses a separate Redis instance. If sharing Redis, use distinct `COUNTER_PREFIX` values.
+- **Morph maps:** Configure `Relation::enforceMorphMap()` in each app for models with custom namespaces. The sync command resolves models via morph map first, then falls back to `App\Models\*`.
+- **Migrations:** Published per-app. The table name is configurable via `counter.table_name`.
 
 ## Git Conventions
 
