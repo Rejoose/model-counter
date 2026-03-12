@@ -45,7 +45,7 @@ class ModelCounter extends Model
         ?Carbon $periodStart = null
     ): int {
         $query = static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
         ]);
@@ -80,7 +80,7 @@ class ModelCounter extends Model
         }
 
         $whereClause = [
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
         ];
@@ -104,7 +104,7 @@ class ModelCounter extends Model
         // If no record was updated, create a new one
         if (! $updated) {
             $data = [
-                'owner_type' => $owner::class,
+                'owner_type' => $owner->getMorphClass(),
                 'owner_id' => $owner->getKey(),
                 'key' => $key,
                 'interval' => $interval?->value,
@@ -164,7 +164,7 @@ class ModelCounter extends Model
         }
 
         // Build query that properly handles NULL values
-        $query = static::where('owner_type', $owner::class)
+        $query = static::where('owner_type', $owner->getMorphClass())
             ->where('owner_id', $owner->getKey())
             ->where('key', $key);
 
@@ -182,7 +182,7 @@ class ModelCounter extends Model
             $record->update(['count' => $value]);
         } else {
             static::create([
-                'owner_type' => $owner::class,
+                'owner_type' => $owner->getMorphClass(),
                 'owner_id' => $owner->getKey(),
                 'key' => $key,
                 'interval' => $interval?->value,
@@ -198,7 +198,7 @@ class ModelCounter extends Model
     public static function allForOwner(Model $owner): array
     {
         return static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
         ])
             ->whereNull('interval')
@@ -223,7 +223,7 @@ class ModelCounter extends Model
         $dateStrings = array_map(fn ($p) => $p->format('Y-m-d'), $periodStarts);
 
         $results = static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
             'interval' => $interval->value,
@@ -252,7 +252,7 @@ class ModelCounter extends Model
         Interval $interval
     ): int {
         return (int) static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
             'interval' => $interval->value,
@@ -268,7 +268,7 @@ class ModelCounter extends Model
         ?Interval $interval = null
     ): int {
         $query = static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
         ]);

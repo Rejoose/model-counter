@@ -28,7 +28,15 @@ class PruneCounters extends Command
     {
         $isDryRun = $this->option('dry-run');
         $intervalFilter = $this->option('interval');
-        $olderThanDays = $this->option('older-than');
+        $olderThanOption = $this->option('older-than');
+
+        if ($olderThanOption !== null && ((string) $olderThanOption === '' || (int) $olderThanOption <= 0)) {
+            $this->error('The --older-than option must be a positive integer.');
+
+            return self::FAILURE;
+        }
+
+        $olderThanDays = $olderThanOption !== null ? (int) $olderThanOption : null;
 
         $intervals = $intervalFilter
             ? [Interval::tryFrom($intervalFilter)]

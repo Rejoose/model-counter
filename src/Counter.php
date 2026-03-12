@@ -162,6 +162,9 @@ class Counter
 
         $cacheValues = [];
         try {
+            if (! method_exists($store, 'connection')) {
+                throw new \RuntimeException('Store does not support connection().');
+            }
             $connection = $store->connection();
             $rawValues = $connection->mget(array_values($redisKeys));
             $i = 0;
@@ -169,7 +172,7 @@ class Counter
                 $cacheValues[$counterKey] = (int) ($rawValues[$i] ?? 0);
                 $i++;
             }
-        } catch (\Exception) {
+        } catch (\Throwable) {
             // Fallback to individual reads if MGET is not available
             foreach ($redisKeys as $counterKey => $redisKey) {
                 $cacheValues[$counterKey] = (int) $store->get($redisKey, 0);
