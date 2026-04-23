@@ -4,8 +4,12 @@ namespace Rejoose\ModelCounter\Tests\Feature;
 
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Event;
 use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
+use Rejoose\ModelCounter\Events\CounterDecremented;
+use Rejoose\ModelCounter\Events\CounterIncremented;
+use Rejoose\ModelCounter\Events\CounterReset;
 use Rejoose\ModelCounter\Models\ModelCounter;
 use Rejoose\ModelCounter\Tests\TestCase;
 use Rejoose\ModelCounter\Traits\HasCounters;
@@ -345,7 +349,9 @@ class CounterTest extends TestCase
         $key = Counter::redisKey($this->user, 'downloads');
 
         $this->assertStringContainsString('counter:', $key);
-        $this->assertStringContainsString('testuser:', $key);
+        // Uses morph class with dots for namespace separators
+        $morphClass = strtolower(str_replace('\\', '.', $this->user->getMorphClass()));
+        $this->assertStringContainsString($morphClass.':', $key);
         $this->assertStringContainsString('downloads', $key);
         $this->assertStringNotContainsString('day:', $key);
     }
@@ -357,7 +363,8 @@ class CounterTest extends TestCase
         $key = Counter::redisKey($this->user, 'downloads', Interval::Day);
 
         $this->assertStringContainsString('counter:', $key);
-        $this->assertStringContainsString('testuser:', $key);
+        $morphClass = strtolower(str_replace('\\', '.', $this->user->getMorphClass()));
+        $this->assertStringContainsString($morphClass.':', $key);
         $this->assertStringContainsString('downloads', $key);
         $this->assertStringContainsString(':day:', $key);
         $this->assertStringContainsString('2024-06-15', $key);
@@ -375,6 +382,15 @@ class CounterTest extends TestCase
         $this->assertStringContainsString('2024-06', $key);
 
         Carbon::setTestNow();
+    }
+
+    public function test_redis_key_uses_morph_class(): void
+    {
+        $key = Counter::redisKey($this->user, 'views');
+
+        // Should use getMorphClass() not class_basename()
+        $expected = 'counter:'.strtolower(str_replace('\\', '.', TestUser::class)).':'.$this->user->getKey().':views';
+        $this->assertEquals($expected, $key);
     }
 
     // ==================== DIRECT MODE TESTS ====================
@@ -398,6 +414,170 @@ class CounterTest extends TestCase
         $this->assertEquals('Monthly', Interval::Month->label());
         $this->assertEquals('Quarterly', Interval::Quarter->label());
         $this->assertEquals('Yearly', Interval::Year->label());
+    }
+
+    // ==================== KEY VALIDATION TESTS ====================
+
+    public function test_empty_key_throws_exception(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Counter key cannot be empty.');
+
+        Counter::increment($this->user, '');
+    }
+
+    public function test_key_with_colon_throws_exception(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Counter key cannot contain colons.');
+
+        Counter::increment($this->user, 'invalid:key');
+    }
+
+    public function test_key_exceeding_100_chars_throws_exception(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Counter key cannot exceed 100 characters.');
+
+        Counter::increment($this->user, str_repeat('a', 101));
+    }
+
+    public function test_valid_key_does_not_throw(): void
+    {
+        Counter::increment($this->user, 'valid_key-name.here');
+
+        $this->assertEquals(1, Counter::get($this->user, 'valid_key-name.here'));
+    }
+
+    // ==================== BULK OPERATIONS TESTS ====================
+
+    public function test_can_increment_many_counters(): void
+    {
+        Counter::incrementMany($this->user, [
+            'views' => 10,
+            'downloads' => 5,
+            'likes' => 3,
+        ]);
+
+        $this->assertEquals(10, Counter::get($this->user, 'views'));
+        $this->assertEquals(5, Counter::get($this->user, 'downloads'));
+        $this->assertEquals(3, Counter::get($this->user, 'likes'));
+    }
+
+    public function test_can_decrement_many_counters(): void
+    {
+        Counter::incrementMany($this->user, [
+            'views' => 100,
+            'downloads' => 50,
+        ]);
+
+        Counter::decrementMany($this->user, [
+            'views' => 30,
+            'downloads' => 10,
+        ]);
+
+        $this->assertEquals(70, Counter::get($this->user, 'views'));
+        $this->assertEquals(40, Counter::get($this->user, 'downloads'));
+    }
+
+    public function test_trait_increment_many_works(): void
+    {
+        $this->user->incrementCounters([
+            'views' => 5,
+            'downloads' => 3,
+        ]);
+
+        $this->assertEquals(5, $this->user->counter('views'));
+        $this->assertEquals(3, $this->user->counter('downloads'));
+    }
+
+    public function test_trait_decrement_many_works(): void
+    {
+        $this->user->incrementCounters(['views' => 20, 'downloads' => 10]);
+        $this->user->decrementCounters(['views' => 5, 'downloads' => 2]);
+
+        $this->assertEquals(15, $this->user->counter('views'));
+        $this->assertEquals(8, $this->user->counter('downloads'));
+    }
+
+    public function test_increment_many_with_interval(): void
+    {
+        Counter::incrementMany($this->user, [
+            'views' => 10,
+            'downloads' => 5,
+        ], Interval::Day);
+
+        $this->assertEquals(10, Counter::get($this->user, 'views', Interval::Day));
+        $this->assertEquals(5, Counter::get($this->user, 'downloads', Interval::Day));
+    }
+
+    // ==================== EVENT TESTS ====================
+
+    public function test_events_dispatched_when_enabled(): void
+    {
+        config(['counter.events' => true]);
+        Event::fake();
+
+        Counter::increment($this->user, 'views', 5);
+
+        Event::assertDispatched(CounterIncremented::class, function ($event) {
+            return $event->key === 'views' && $event->amount === 5;
+        });
+    }
+
+    public function test_decrement_event_dispatched_when_enabled(): void
+    {
+        config(['counter.events' => true]);
+        Event::fake();
+
+        Counter::increment($this->user, 'views', 10);
+        Counter::decrement($this->user, 'views', 3);
+
+        Event::assertDispatched(CounterDecremented::class, function ($event) {
+            return $event->key === 'views' && $event->amount === 3;
+        });
+    }
+
+    public function test_reset_event_dispatched_when_enabled(): void
+    {
+        config(['counter.events' => true]);
+        Event::fake();
+
+        Counter::set($this->user, 'views', 100);
+        Counter::reset($this->user, 'views');
+
+        Event::assertDispatched(CounterReset::class, function ($event) {
+            return $event->key === 'views';
+        });
+    }
+
+    public function test_events_not_dispatched_when_disabled(): void
+    {
+        config(['counter.events' => false]);
+        Event::fake();
+
+        Counter::increment($this->user, 'views', 5);
+
+        Event::assertNotDispatched(CounterIncremented::class);
+    }
+
+    // ==================== CACHE ORDERING TESTS ====================
+
+    public function test_set_writes_db_before_clearing_cache(): void
+    {
+        // Set a value - should work without error
+        Counter::set($this->user, 'test_order', 42);
+
+        // Verify value persisted
+        $this->assertEquals(42, Counter::get($this->user, 'test_order'));
+    }
+
+    public function test_reset_writes_db_before_clearing_cache(): void
+    {
+        Counter::set($this->user, 'test_order', 100);
+        Counter::reset($this->user, 'test_order');
+
+        $this->assertEquals(0, Counter::get($this->user, 'test_order'));
     }
 }
 

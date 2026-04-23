@@ -1,6 +1,5 @@
 <?php
 
-use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Traits\HasCounters;

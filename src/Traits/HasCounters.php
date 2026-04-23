@@ -55,6 +55,26 @@ trait HasCounters
     }
 
     /**
+     * Increment multiple counters at once.
+     *
+     * @param  array<string, int>  $counters  Counter key => amount pairs
+     */
+    public function incrementCounters(array $counters, ?Interval $interval = null): void
+    {
+        Counter::incrementMany($this, $counters, $interval);
+    }
+
+    /**
+     * Decrement multiple counters at once.
+     *
+     * @param  array<string, int>  $counters  Counter key => amount pairs
+     */
+    public function decrementCounters(array $counters, ?Interval $interval = null): void
+    {
+        Counter::decrementMany($this, $counters, $interval);
+    }
+
+    /**
      * Reset a counter to zero.
      */
     public function resetCounter(string $key, ?Interval $interval = null, ?Carbon $periodStart = null): void
@@ -135,9 +155,12 @@ trait HasCounters
      */
     public function scopeWithCounter(Builder $query, string $key): void
     {
-        $alias = 'counter_'.$key;
+        $alias = 'counter_'.preg_replace('/[^a-zA-Z0-9_]/', '_', $key);
+        $selectAlias = preg_replace('/[^a-zA-Z0-9_]/', '_', $key).'_count';
 
-        $query->leftJoin("model_counters as {$alias}", function ($join) use ($key, $alias) {
+        $counterTable = config('counter.table_name', 'model_counters');
+
+        $query->leftJoin("{$counterTable} as {$alias}", function ($join) use ($key, $alias) {
             $join->on("{$alias}.owner_id", '=', $this->getQualifiedKeyName())
                 ->where("{$alias}.owner_type", '=', $this->getMorphClass())
                 ->where("{$alias}.key", '=', $key)
@@ -145,7 +168,7 @@ trait HasCounters
                 ->whereNull("{$alias}.period_start");
         })->addSelect([
             $this->getTable().'.*',
-            "{$alias}.count as {$key}_count",
+            "{$alias}.count as {$selectAlias}",
         ]);
     }
 
@@ -154,19 +177,21 @@ trait HasCounters
      */
     public function scopeOrderByCounter(Builder $query, string $key, string $direction = 'desc'): void
     {
-        $alias = 'counter_'.$key;
+        $alias = 'counter_'.preg_replace('/[^a-zA-Z0-9_]/', '_', $key);
+
+        $counterTable = config('counter.table_name', 'model_counters');
 
         $joins = $query->getQuery()->joins ?? [];
         $alreadyJoined = false;
         foreach ($joins as $join) {
-            if (isset($join->table) && $join->table === "model_counters as {$alias}") {
+            if (isset($join->table) && $join->table === "{$counterTable} as {$alias}") {
                 $alreadyJoined = true;
                 break;
             }
         }
 
         if (! $alreadyJoined) {
-            $query->leftJoin("model_counters as {$alias}", function ($join) use ($key, $alias) {
+            $query->leftJoin("{$counterTable} as {$alias}", function ($join) use ($key, $alias) {
                 $join->on("{$alias}.owner_id", '=', $this->getQualifiedKeyName())
                     ->where("{$alias}.owner_type", '=', $this->getMorphClass())
                     ->where("{$alias}.key", '=', $key)

@@ -2,8 +2,10 @@
 
 namespace Rejoose\ModelCounter;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\ServiceProvider;
+use Rejoose\ModelCounter\Console\PruneCounters;
 use Rejoose\ModelCounter\Console\SyncCounters;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Traits\HasCounters;
@@ -49,11 +51,12 @@ class ModelCounterServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 SyncCounters::class,
+                PruneCounters::class,
             ]);
         }
 
         // Register relation macro
-        Relation::macro('recount', function (?string $key = null, ?Interval $interval = null, int $periods = 1, ?\Carbon\Carbon $fromDate = null, string $dateColumn = 'created_at') {
+        Relation::macro('recount', function (?string $key = null, ?Interval $interval = null, int $periods = 1, ?Carbon $fromDate = null, string $dateColumn = 'created_at') {
             /** @var Relation $this */
             $model = $this->getParent();
 

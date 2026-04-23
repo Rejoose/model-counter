@@ -2,9 +2,12 @@
 
 namespace Rejoose\ModelCounter\Console;
 
+use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Cache;
 use Rejoose\ModelCounter\Enums\Interval;
+use Rejoose\ModelCounter\Events\CounterSynced;
 use Rejoose\ModelCounter\Models\ModelCounter;
 
 class SyncCounters extends Command
@@ -91,9 +94,10 @@ class SyncCounters extends Command
             foreach ($batches as $batchIndex => $batch) {
                 $this->info('Processing batch '.($batchIndex + 1).' of '.count($batches).'...');
 
+                // Phase 1: Parse all keys and fetch values
+                $parsedEntries = [];
                 foreach ($batch as $key) {
                     try {
-                        // Get the value and delete atomically
                         $value = $isDryRun
                             ? (int) $redis->get($key)
                             : (int) $redis->getdel($key);
@@ -104,80 +108,70 @@ class SyncCounters extends Command
                             continue;
                         }
 
-                        // Parse the key
-                        $parsedKey = str_replace($prefix, '', $key);
-                        $parts = explode(':', $parsedKey);
-
-                        // Key format can be:
-                        // - owner_type:owner_id:counter_key (3 parts, no interval)
-                        // - owner_type:owner_id:counter_key:interval:period_key (5 parts, with interval)
-                        if (count($parts) !== 3 && count($parts) !== 5) {
+                        $parsed = $this->parseRedisKey($key, $prefix);
+                        if ($parsed === null) {
                             $this->warn("Invalid key format: {$key}");
                             $errors++;
 
                             continue;
                         }
 
-                        $ownerType = $parts[0];
-                        $ownerId = $parts[1];
-                        $counterKey = $parts[2];
-                        $interval = null;
-                        $periodStart = null;
-
-                        if (count($parts) === 5) {
-                            $intervalValue = $parts[3];
-                            $interval = Interval::tryFrom($intervalValue);
-
-                            if ($interval === null) {
-                                $this->warn("Invalid interval: {$intervalValue} in key: {$key}");
-                                $errors++;
-
-                                continue;
-                            }
-
-                            // Parse period key back to date
-                            $periodStart = $this->parsePeriodKey($interval, $parts[4]);
-
-                            if ($periodStart === null) {
-                                $this->warn("Invalid period key: {$parts[4]} in key: {$key}");
-                                $errors++;
-
-                                continue;
-                            }
-                        }
-
-                        // Try to resolve the owner model class
-                        $modelClass = $this->resolveModelClass($ownerType);
-
-                        if (! $modelClass || ! class_exists($modelClass)) {
-                            $this->warn("Model class not found for: {$ownerType}");
-                            $errors++;
-
-                            continue;
-                        }
-
-                        // Find the owner
-                        $owner = $modelClass::find($ownerId);
-
-                        if (! $owner) {
-                            $this->warn("Owner not found: {$modelClass}#{$ownerId}");
-                            $errors++;
-
-                            continue;
-                        }
-
-                        if (! $isDryRun) {
-                            // Sync to database
-                            ModelCounter::addDelta($owner, $counterKey, $value, $interval, $periodStart);
-                        }
-
-                        $intervalInfo = $interval ? " [{$interval->value}:{$parts[4]}]" : '';
-                        $this->line("  ✓ {$modelClass}#{$ownerId} [{$counterKey}]{$intervalInfo} += {$value}");
-                        $synced++;
+                        $parsed['value'] = $value;
+                        $parsed['redis_key'] = $key;
+                        $parsedEntries[] = $parsed;
 
                     } catch (\Exception $e) {
                         $this->error("Error processing {$key}: ".$e->getMessage());
                         $errors++;
+                    }
+                }
+
+                // Phase 2: Batch-load owners grouped by model class
+                $ownersByClass = [];
+                foreach ($parsedEntries as $entry) {
+                    $modelClass = $this->resolveModelClass($entry['owner_type']);
+                    if (! $modelClass || ! class_exists($modelClass)) {
+                        $this->warn("Model class not found for: {$entry['owner_type']}");
+                        $errors++;
+
+                        continue;
+                    }
+                    $entry['model_class'] = $modelClass;
+                    $ownersByClass[$modelClass][] = $entry;
+                }
+
+                $ownerCache = [];
+                foreach ($ownersByClass as $modelClass => $entries) {
+                    $ownerIds = array_unique(array_column($entries, 'owner_id'));
+                    $owners = $modelClass::whereIn((new $modelClass)->getKeyName(), $ownerIds)->get()->keyBy(fn ($m) => $m->getKey());
+                    $ownerCache[$modelClass] = $owners;
+                }
+
+                // Phase 3: Process entries with pre-loaded owners
+                foreach ($ownersByClass as $modelClass => $entries) {
+                    foreach ($entries as $entry) {
+                        try {
+                            $owner = $ownerCache[$modelClass][$entry['owner_id']] ?? null;
+
+                            if (! $owner) {
+                                $this->warn("Owner not found: {$modelClass}#{$entry['owner_id']}");
+                                $errors++;
+
+                                continue;
+                            }
+
+                            if (! $isDryRun) {
+                                ModelCounter::addDelta($owner, $entry['counter_key'], $entry['value'], $entry['interval'], $entry['period_start']);
+                            }
+
+                            $intervalInfo = $entry['interval'] ? " [{$entry['interval']->value}:{$entry['period_key_str']}]" : '';
+                            $this->line("  ✓ {$modelClass}#{$entry['owner_id']} [{$entry['counter_key']}]{$intervalInfo} += {$entry['value']}");
+                            $synced++;
+
+                        } catch (\Exception $e) {
+                            $this->error("Error processing {$entry['redis_key']}: ".$e->getMessage());
+                            $errors++;
+                        }
                     }
                 }
             }
@@ -198,6 +192,10 @@ class SyncCounters extends Command
                 $this->warn('This was a dry run. No data was actually synced.');
             }
 
+            if (! $isDryRun && config('counter.events', false)) {
+                event(new CounterSynced($synced, $skipped, $errors));
+            }
+
             return $errors > 0 ? self::FAILURE : self::SUCCESS;
 
         } catch (\Exception $e) {
@@ -208,12 +206,74 @@ class SyncCounters extends Command
     }
 
     /**
+     * Parse a Redis key into its components.
+     *
+     * @return array{owner_type: string, owner_id: string, counter_key: string, interval: ?Interval, period_start: ?Carbon, period_key_str: ?string}|null
+     */
+    protected function parseRedisKey(string $key, string $prefix): ?array
+    {
+        $parsedKey = str_replace($prefix, '', $key);
+        $parts = explode(':', $parsedKey);
+
+        if (count($parts) < 3) {
+            return null;
+        }
+
+        $interval = null;
+        $periodStart = null;
+        $periodKeyStr = null;
+
+        // Check if the second-to-last part is a valid interval
+        if (count($parts) >= 5) {
+            $possibleInterval = Interval::tryFrom($parts[count($parts) - 2]);
+            if ($possibleInterval !== null) {
+                $periodKeyStr = array_pop($parts);
+                array_pop($parts); // remove interval
+                $interval = $possibleInterval;
+
+                $periodStart = $this->parsePeriodKey($interval, $periodKeyStr);
+
+                if ($periodStart === null) {
+                    return null;
+                }
+            }
+        }
+
+        if (count($parts) < 3) {
+            return null;
+        }
+
+        $counterKey = array_pop($parts);
+        $ownerId = array_pop($parts);
+        $ownerType = implode(':', $parts);
+
+        return [
+            'owner_type' => $ownerType,
+            'owner_id' => $ownerId,
+            'counter_key' => $counterKey,
+            'interval' => $interval,
+            'period_start' => $periodStart,
+            'period_key_str' => $periodKeyStr,
+        ];
+    }
+
+    /**
      * Resolve the full model class name from the owner type.
      */
     protected function resolveModelClass(string $ownerType): ?string
     {
-        // Try common conventions
+        // First, check Laravel's morph map (supports custom aliases)
+        $morphedModel = Relation::getMorphedModel($ownerType);
+        if ($morphedModel && class_exists($morphedModel)) {
+            return $morphedModel;
+        }
+
+        // Convert dot-notation morph class back to namespace (e.g., app.models.user → App\Models\User)
+        $fromDotNotation = str_replace('.', '\\', $ownerType);
+        $fromDotNotation = implode('\\', array_map('ucfirst', explode('\\', $fromDotNotation)));
+
         $attempts = [
+            $fromDotNotation,
             'App\\Models\\'.ucfirst($ownerType),
             'App\\Models\\'.$ownerType,
             $ownerType, // Already fully qualified
@@ -231,15 +291,15 @@ class SyncCounters extends Command
     /**
      * Parse a period key back to a Carbon date.
      */
-    protected function parsePeriodKey(Interval $interval, string $periodKey): ?\Carbon\Carbon
+    protected function parsePeriodKey(Interval $interval, string $periodKey): ?Carbon
     {
         try {
             return match ($interval) {
-                Interval::Day => \Carbon\Carbon::createFromFormat('Y-m-d', $periodKey)?->startOfDay(),
+                Interval::Day => Carbon::createFromFormat('Y-m-d', $periodKey)?->startOfDay(),
                 Interval::Week => $this->parseIsoWeek($periodKey),
-                Interval::Month => \Carbon\Carbon::createFromFormat('Y-m', $periodKey)?->startOfMonth(),
+                Interval::Month => Carbon::createFromFormat('Y-m', $periodKey)?->startOfMonth(),
                 Interval::Quarter => $this->parseQuarter($periodKey),
-                Interval::Year => \Carbon\Carbon::createFromFormat('Y', $periodKey)?->startOfYear(),
+                Interval::Year => Carbon::createFromFormat('Y', $periodKey)?->startOfYear(),
             };
         } catch (\Exception) {
             return null;
@@ -249,10 +309,10 @@ class SyncCounters extends Command
     /**
      * Parse ISO week format (e.g., "2024-W01") to Carbon.
      */
-    protected function parseIsoWeek(string $weekKey): ?\Carbon\Carbon
+    protected function parseIsoWeek(string $weekKey): ?Carbon
     {
         if (preg_match('/^(\d{4})-W?(\d{2})$/', $weekKey, $matches)) {
-            return \Carbon\Carbon::now()
+            return Carbon::now()
                 ->setISODate((int) $matches[1], (int) $matches[2])
                 ->startOfWeek();
         }
@@ -263,14 +323,14 @@ class SyncCounters extends Command
     /**
      * Parse quarter format (e.g., "2024-Q1") to Carbon.
      */
-    protected function parseQuarter(string $quarterKey): ?\Carbon\Carbon
+    protected function parseQuarter(string $quarterKey): ?Carbon
     {
         if (preg_match('/^(\d{4})-Q(\d)$/', $quarterKey, $matches)) {
             $year = (int) $matches[1];
             $quarter = (int) $matches[2];
             $month = ($quarter - 1) * 3 + 1;
 
-            return \Carbon\Carbon::create($year, $month, 1)->startOfMonth();
+            return Carbon::create($year, $month, 1)->startOfMonth();
         }
 
         return null;

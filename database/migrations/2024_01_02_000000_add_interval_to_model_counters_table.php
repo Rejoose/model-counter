@@ -60,7 +60,7 @@ return new class extends Migration
             Schema::table($tableName, function (Blueprint $table) {
                 $table->dropIndex('model_counters_period_index');
             });
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             // Index may not exist if this migration didn't run up()
         }
 

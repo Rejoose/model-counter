@@ -69,4 +69,35 @@ return [
     |
     */
     'table_name' => 'model_counters',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Events
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, counter operations will dispatch events that your
+    | application can listen to (CounterIncremented, CounterDecremented,
+    | CounterReset, CounterSynced).
+    |
+    | Disable in high-traffic environments where event overhead is unwanted.
+    |
+    */
+    'events' => env('COUNTER_EVENTS', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Retention Periods
+    |--------------------------------------------------------------------------
+    |
+    | Number of days to retain interval-based counter records before pruning.
+    | Set to null to retain indefinitely. Used by the counter:prune command.
+    |
+    */
+    'retention' => [
+        'day' => 90,
+        'week' => 365,
+        'month' => null,
+        'quarter' => null,
+        'year' => null,
+    ],
 ];

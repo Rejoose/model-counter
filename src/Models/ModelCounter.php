@@ -39,13 +39,13 @@ class ModelCounter extends Model
      * Get the current counter value from the database for a given owner and key.
      */
     public static function valueFor(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): int {
         $query = static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
         ]);
@@ -68,7 +68,7 @@ class ModelCounter extends Model
      * Uses upsert for atomic operations with proper MySQL/PostgreSQL compatibility.
      */
     public static function addDelta(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         int $amount,
         ?Interval $interval = null,
@@ -80,7 +80,7 @@ class ModelCounter extends Model
         }
 
         $whereClause = [
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
         ];
@@ -97,14 +97,14 @@ class ModelCounter extends Model
 
         // Try to update existing record
         $updated = $query->update([
-            'count' => DB::raw("count + {$amount}"),
+            'count' => DB::raw('count + '.intval($amount)),
             'updated_at' => now(),
         ]);
 
         // If no record was updated, create a new one
         if (! $updated) {
             $data = [
-                'owner_type' => $owner::class,
+                'owner_type' => $owner->getMorphClass(),
                 'owner_id' => $owner->getKey(),
                 'key' => $key,
                 'interval' => $interval?->value,
@@ -129,7 +129,7 @@ class ModelCounter extends Model
                 }
 
                 $retryQuery->update([
-                    'count' => DB::raw("count + {$amount}"),
+                    'count' => DB::raw('count + '.intval($amount)),
                     'updated_at' => now(),
                 ]);
             }
@@ -140,7 +140,7 @@ class ModelCounter extends Model
      * Reset a counter to zero.
      */
     public static function resetValue(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
@@ -152,7 +152,7 @@ class ModelCounter extends Model
      * Set a counter to a specific value.
      */
     public static function setValue(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         int $value,
         ?Interval $interval = null,
@@ -164,7 +164,7 @@ class ModelCounter extends Model
         }
 
         // Build query that properly handles NULL values
-        $query = static::where('owner_type', $owner::class)
+        $query = static::where('owner_type', $owner->getMorphClass())
             ->where('owner_id', $owner->getKey())
             ->where('key', $key);
 
@@ -182,7 +182,7 @@ class ModelCounter extends Model
             $record->update(['count' => $value]);
         } else {
             static::create([
-                'owner_type' => $owner::class,
+                'owner_type' => $owner->getMorphClass(),
                 'owner_id' => $owner->getKey(),
                 'key' => $key,
                 'interval' => $interval?->value,
@@ -195,10 +195,10 @@ class ModelCounter extends Model
     /**
      * Get all counters for a given owner.
      */
-    public static function allForOwner(\Illuminate\Database\Eloquent\Model $owner): array
+    public static function allForOwner(Model $owner): array
     {
         return static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
         ])
             ->whereNull('interval')
@@ -213,7 +213,7 @@ class ModelCounter extends Model
      * @return array<string, int> Period key => count
      */
     public static function history(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         Interval $interval,
         int $periods = 12,
@@ -223,7 +223,7 @@ class ModelCounter extends Model
         $dateStrings = array_map(fn ($p) => $p->format('Y-m-d'), $periodStarts);
 
         $results = static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
             'interval' => $interval->value,
@@ -247,12 +247,12 @@ class ModelCounter extends Model
      * Get sum of counts across all periods for an interval-based counter.
      */
     public static function sumForInterval(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         Interval $interval
     ): int {
         return (int) static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
             'interval' => $interval->value,
@@ -263,12 +263,12 @@ class ModelCounter extends Model
      * Delete all counter records for an owner and key.
      */
     public static function deleteFor(
-        \Illuminate\Database\Eloquent\Model $owner,
+        Model $owner,
         string $key,
         ?Interval $interval = null
     ): int {
         $query = static::where([
-            'owner_type' => $owner::class,
+            'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
         ]);

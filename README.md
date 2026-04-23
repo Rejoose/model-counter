@@ -13,12 +13,15 @@ Perfect for tracking downloads, views, likes, visits, or any metric that needs t
 - ⚡ **Blazing Fast**: Uses Redis atomic operations for lightning-fast increments
 - 🔄 **Efficient Sync**: Scheduled batch syncing to database reduces DB load by 99%
 - 📅 **Interval Counting**: Track counts by day, week, month, quarter, or year
-- 🔁 **Safe Recount**: Safely recount values from source data
+- 🔁 **Safe Recount**: Safely recalculate counters from source data
+- 📦 **Bulk Operations**: Increment or decrement multiple counters in one call
 - 🎯 **Polymorphic**: Works with any Eloquent model as the "owner"
+- 📣 **Events**: Opt-in event dispatching for counter changes and syncs
+- 🧹 **Pruning**: Automatic cleanup of old interval-based records with configurable retention
 - 🖥️ **Filament Integration**: Optional Filament 4 admin panel resource
+- 🔒 **Multi-App Safe**: Morph map support and configurable prefixes prevent key collisions
 - 💪 **Production Ready**: Battle-tested architecture used in high-traffic analytics systems
 - 🧪 **Well Tested**: Comprehensive test coverage
-- 📦 **Zero Config**: Works out of the box with sensible defaults
 - 🔧 **Highly Configurable**: Customize every aspect to fit your needs
 
 ## 📋 Requirements
@@ -60,7 +63,7 @@ REDIS_PORT=6379
 
 ### Step 5: Schedule Counter Sync
 
-Add this to your `routes/console.php` (Laravel 11+):
+Add this to your `routes/console.php`:
 
 ```php
 use Illuminate\Support\Facades\Schedule;
@@ -68,13 +71,10 @@ use Illuminate\Support\Facades\Schedule;
 Schedule::command('counter:sync')->everyMinute();
 ```
 
-Or in `app/Console/Kernel.php` (Laravel 10):
+Optionally, schedule pruning of old interval records:
 
 ```php
-protected function schedule(Schedule $schedule): void
-{
-    $schedule->command('counter:sync')->everyMinute();
-}
+Schedule::command('counter:prune')->daily();
 ```
 
 ## 🚀 Quick Start
@@ -127,6 +127,29 @@ $user->resetCounter('downloads');
 
 // Set to specific value
 $user->setCounter('downloads', 1000);
+```
+
+### 5. Bulk Operations
+
+Increment or decrement multiple counters at once:
+
+```php
+// Increment multiple counters
+$user->incrementCounters([
+    'views' => 1,
+    'impressions' => 3,
+    'engagement' => 2,
+]);
+
+// Decrement multiple counters
+$user->decrementCounters([
+    'credits' => 5,
+    'tokens' => 10,
+]);
+
+// Get multiple counters
+$stats = $user->counters(['downloads', 'views', 'likes']);
+// ['downloads' => 1523, 'views' => 4521, 'likes' => 234]
 ```
 
 ## 📅 Interval-Based Counting
@@ -479,6 +502,18 @@ $user->deleteCounter('old_metric');
 $user->deleteCounter('page_views', Interval::Day);
 ```
 
+### Bulk Operations via Counter Facade
+
+```php
+use Rejoose\ModelCounter\Counter;
+
+Counter::incrementMany($user, ['views' => 1, 'impressions' => 3]);
+Counter::decrementMany($user, ['credits' => 5, 'tokens' => 10]);
+
+// Get multiple counters at once
+$values = Counter::getMany($user, ['views', 'downloads', 'likes']);
+```
+
 ### Manual Sync
 
 You can manually trigger a sync anytime:
@@ -492,6 +527,86 @@ php artisan counter:sync --dry-run
 
 # Sync specific pattern
 php artisan counter:sync --pattern="user:*"
+```
+
+## 🧹 Pruning Old Records
+
+The `counter:prune` command removes old interval-based records according to configurable retention periods.
+
+```bash
+# Prune using configured retention periods
+php artisan counter:prune
+
+# Preview what would be pruned
+php artisan counter:prune --dry-run
+
+# Override retention (delete records older than 30 days)
+php artisan counter:prune --older-than=30
+
+# Only prune a specific interval
+php artisan counter:prune --interval=day
+```
+
+Default retention periods (configurable in `config/counter.php`):
+
+| Interval | Retention | Description |
+|----------|-----------|-------------|
+| Day      | 90 days   | Keep daily records for 3 months |
+| Week     | 365 days  | Keep weekly records for 1 year |
+| Month    | Forever   | Never auto-prune monthly records |
+| Quarter  | Forever   | Never auto-prune quarterly records |
+| Year     | Forever   | Never auto-prune yearly records |
+
+Schedule automatic pruning in `routes/console.php`:
+
+```php
+Schedule::command('counter:prune')->daily();
+```
+
+## 📣 Events
+
+Enable event dispatching by setting `COUNTER_EVENTS=true` in your `.env` or `counter.events` in config.
+
+The following events are dispatched:
+
+| Event | When |
+|-------|------|
+| `CounterIncremented` | A counter is incremented |
+| `CounterDecremented` | A counter is decremented |
+| `CounterReset` | A counter is reset to zero |
+| `CounterSynced` | The `counter:sync` command completes |
+
+### Listening to Events
+
+```php
+use Rejoose\ModelCounter\Events\CounterIncremented;
+
+class HandleCounterIncrement
+{
+    public function handle(CounterIncremented $event): void
+    {
+        // $event->owner    — The model that owns the counter
+        // $event->key      — The counter key (e.g., 'downloads')
+        // $event->amount   — The increment amount
+        // $event->interval — The interval (null for total counters)
+    }
+}
+```
+
+The `CounterSynced` event provides sync statistics:
+
+```php
+use Rejoose\ModelCounter\Events\CounterSynced;
+
+class HandleSyncComplete
+{
+    public function handle(CounterSynced $event): void
+    {
+        // $event->synced  — Number of counters synced
+        // $event->skipped — Number of zero-value keys skipped
+        // $event->errors  — Number of errors encountered
+    }
+}
 ```
 
 ## ⚙️ Configuration
@@ -514,6 +629,18 @@ return [
 
     // Table name
     'table_name' => 'model_counters',
+
+    // Dispatch events on counter operations
+    'events' => env('COUNTER_EVENTS', false),
+
+    // Retention periods for interval records (in days, null = keep forever)
+    'retention' => [
+        'day' => 90,
+        'week' => 365,
+        'month' => null,
+        'quarter' => null,
+        'year' => null,
+    ],
 ];
 ```
 
@@ -524,6 +651,7 @@ COUNTER_STORE=redis
 COUNTER_DIRECT=false
 COUNTER_PREFIX=counter:
 COUNTER_SYNC_BATCH_SIZE=1000
+COUNTER_EVENTS=false
 ```
 
 ### Direct Mode (Local Development)
@@ -595,13 +723,24 @@ CREATE TABLE model_counters (
 );
 ```
 
+## 🔑 Key Validation
+
+Counter keys are validated on every operation and must satisfy:
+
+- **Non-empty** — cannot be blank
+- **No colons** — the `:` character is reserved for Redis key namespacing
+- **Max 100 characters** — enforced to match the database column length
+
+Invalid keys throw an `\InvalidArgumentException`.
+
 ## 🔒 Thread Safety
 
 All operations are designed to be thread-safe:
 
 - Redis atomic operations (`INCR`, `DECR`)
 - Database upserts with proper locking
-- Race condition handling in sync command
+- `GETDEL` during sync prevents double-counting
+- Race condition handling with insert-or-update retry
 
 ## 🐛 Troubleshooting
 
