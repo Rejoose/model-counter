@@ -67,7 +67,10 @@ class ModelCounterServiceProvider extends ServiceProvider
             $key = $key ?? $this->getRelated()->getTable();
             $relation = $this;
 
+            // HasCounters trait methods are resolved on the concrete model at
+            // runtime; PHPStan can't see them through the `Model` base class.
             if ($interval) {
+                /** @phpstan-ignore-next-line */
                 return $model->recountCounterPeriods(
                     $key,
                     $interval,
@@ -82,6 +85,7 @@ class ModelCounterServiceProvider extends ServiceProvider
                 );
             }
 
+            /** @phpstan-ignore-next-line */
             return $model->recountCounter($key, fn () => $this->count(), $interval);
         });
     }

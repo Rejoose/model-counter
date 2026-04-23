@@ -25,7 +25,6 @@ jobs:
 
       - name: Run PHPStan
         run: composer phpstan
-        continue-on-error: true
 
   pint:
     runs-on: ubuntu-latest
@@ -45,5 +44,4 @@ jobs:
 
       - name: Run Laravel Pint
         run: composer pint
-        continue-on-error: true
 

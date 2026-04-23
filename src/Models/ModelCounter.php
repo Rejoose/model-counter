@@ -7,6 +7,16 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Rejoose\ModelCounter\Enums\Interval;
 
+/**
+ * @property int $id
+ * @property string $owner_type
+ * @property int|string $owner_id
+ * @property string $key
+ * @property ?Interval $interval
+ * @property ?string $period_start
+ * @property int $count
+ * @property string $unique_hash
+ */
 class ModelCounter extends Model
 {
     /**
@@ -35,6 +45,51 @@ class ModelCounter extends Model
         return config('counter.table_name', 'model_counters');
     }
 
+    protected static function booted(): void
+    {
+        static::creating(function (self $counter) {
+            if ($counter->unique_hash) {
+                return;
+            }
+
+            $counter->unique_hash = static::hashFor(
+                $counter->owner_type,
+                $counter->owner_id,
+                $counter->key,
+                $counter->interval instanceof Interval ? $counter->interval->value : $counter->interval,
+                $counter->period_start
+            );
+        });
+    }
+
+    /**
+     * Build the deterministic uniqueness hash for a counter row.
+     *
+     * Using a single-column sha1 works around MySQL/Postgres treating NULL
+     * as distinct in composite unique indexes, which let duplicate
+     * `(owner, key, NULL, NULL)` rows slip past the old
+     * model_counters_unique constraint.
+     */
+    public static function hashFor(
+        string $ownerType,
+        int|string $ownerId,
+        string $key,
+        ?string $interval,
+        Carbon|string|null $periodStart
+    ): string {
+        if ($periodStart instanceof Carbon) {
+            $periodStart = $periodStart->toDateString();
+        }
+
+        return sha1(implode('|', [
+            $ownerType,
+            (string) $ownerId,
+            $key,
+            $interval ?? '',
+            $periodStart ?? '',
+        ]));
+    }
+
     /**
      * Get the current counter value from the database for a given owner and key.
      */
@@ -44,31 +99,44 @@ class ModelCounter extends Model
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): int {
-        $query = static::where([
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
-            'key' => $key,
-        ]);
+        $hash = static::hashFor(
+            $owner->getMorphClass(),
+            $owner->getKey(),
+            $key,
+            $interval?->value,
+            $interval !== null ? ($periodStart ?? $interval->periodStart()) : null
+        );
 
-        if ($interval !== null) {
-            $periodStart = $periodStart ?? $interval->periodStart();
-            $query->where('interval', $interval->value)
-                ->where('period_start', $periodStart->toDateString());
-        } else {
-            $query->whereNull('interval')
-                ->whereNull('period_start');
-        }
-
-        return $query->value('count') ?? 0;
+        return (int) (static::where('unique_hash', $hash)->value('count') ?? 0);
     }
 
     /**
      * Add a delta to an existing counter (or create it if it doesn't exist).
-     *
-     * Uses upsert for atomic operations with proper MySQL/PostgreSQL compatibility.
      */
     public static function addDelta(
         Model $owner,
+        string $key,
+        int $amount,
+        ?Interval $interval = null,
+        ?Carbon $periodStart = null
+    ): void {
+        static::addDeltaRaw(
+            $owner->getMorphClass(),
+            $owner->getKey(),
+            $key,
+            $amount,
+            $interval,
+            $periodStart
+        );
+    }
+
+    /**
+     * Add a delta without requiring a loaded owner model. Used by sync so we
+     * don't pay for N `Model::find()` lookups per batch.
+     */
+    public static function addDeltaRaw(
+        string $ownerType,
+        int|string $ownerId,
         string $key,
         int $amount,
         ?Interval $interval = null,
@@ -79,61 +147,47 @@ class ModelCounter extends Model
             $periodStartDate = ($periodStart ?? $interval->periodStart())->toDateString();
         }
 
-        $whereClause = [
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
-            'key' => $key,
-        ];
+        $hash = static::hashFor(
+            $ownerType,
+            $ownerId,
+            $key,
+            $interval?->value,
+            $periodStartDate
+        );
 
-        $query = static::where($whereClause);
-
-        if ($interval !== null) {
-            $query->where('interval', $interval->value)
-                ->where('period_start', $periodStartDate);
-        } else {
-            $query->whereNull('interval')
-                ->whereNull('period_start');
+        if (static::incrementByHash($hash, $amount)) {
+            return;
         }
 
-        // Try to update existing record
-        $updated = $query->update([
-            'count' => DB::raw('count + '.intval($amount)),
+        $inserted = static::insertOrIgnore([
+            'owner_type' => $ownerType,
+            'owner_id' => $ownerId,
+            'key' => $key,
+            'interval' => $interval?->value,
+            'period_start' => $periodStartDate,
+            'count' => $amount,
+            'unique_hash' => $hash,
+            'created_at' => now(),
             'updated_at' => now(),
         ]);
 
-        // If no record was updated, create a new one
-        if (! $updated) {
-            $data = [
-                'owner_type' => $owner->getMorphClass(),
-                'owner_id' => $owner->getKey(),
-                'key' => $key,
-                'interval' => $interval?->value,
-                'period_start' => $periodStartDate,
-                'count' => $amount,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ];
-
-            $inserted = static::insertOrIgnore($data);
-
-            // If insert failed due to race condition (record was created by another process),
-            // try update again to add the delta
-            if (! $inserted) {
-                $retryQuery = static::where($whereClause);
-                if ($interval !== null) {
-                    $retryQuery->where('interval', $interval->value)
-                        ->where('period_start', $periodStartDate);
-                } else {
-                    $retryQuery->whereNull('interval')
-                        ->whereNull('period_start');
-                }
-
-                $retryQuery->update([
-                    'count' => DB::raw('count + '.intval($amount)),
-                    'updated_at' => now(),
-                ]);
-            }
+        if ($inserted) {
+            return;
         }
+
+        // Lost the insert race with another worker; retry the update.
+        static::incrementByHash($hash, $amount);
+    }
+
+    /**
+     * Apply a parameter-bound increment to the row matching $hash.
+     * Returns the number of affected rows (0 if no row exists yet).
+     */
+    protected static function incrementByHash(string $hash, int $amount): int
+    {
+        return DB::table((new self)->getTable())
+            ->where('unique_hash', $hash)
+            ->increment('count', $amount, ['updated_at' => now()]);
     }
 
     /**
@@ -160,40 +214,43 @@ class ModelCounter extends Model
     ): void {
         $periodStartDate = null;
         if ($interval !== null) {
-            $periodStartDate = ($periodStart ?? $interval->periodStart())->format('Y-m-d');
+            $periodStartDate = ($periodStart ?? $interval->periodStart())->toDateString();
         }
 
-        // Build query that properly handles NULL values
-        $query = static::where('owner_type', $owner->getMorphClass())
-            ->where('owner_id', $owner->getKey())
-            ->where('key', $key);
+        $hash = static::hashFor(
+            $owner->getMorphClass(),
+            $owner->getKey(),
+            $key,
+            $interval?->value,
+            $periodStartDate
+        );
 
-        if ($interval !== null) {
-            $query->where('interval', $interval->value)
-                ->where('period_start', $periodStartDate);
-        } else {
-            $query->whereNull('interval')
-                ->whereNull('period_start');
-        }
-
-        $record = $query->first();
+        $record = static::where('unique_hash', $hash)->first();
 
         if ($record) {
             $record->update(['count' => $value]);
-        } else {
-            static::create([
-                'owner_type' => $owner->getMorphClass(),
-                'owner_id' => $owner->getKey(),
-                'key' => $key,
-                'interval' => $interval?->value,
-                'period_start' => $periodStartDate,
-                'count' => $value,
-            ]);
+
+            return;
         }
+
+        // Populate unique_hash explicitly here so the insert succeeds even
+        // when the `creating` event listener is suppressed by Event::fake()
+        // in tests.
+        static::create([
+            'owner_type' => $owner->getMorphClass(),
+            'owner_id' => $owner->getKey(),
+            'key' => $key,
+            'interval' => $interval?->value,
+            'period_start' => $periodStartDate,
+            'count' => $value,
+            'unique_hash' => $hash,
+        ]);
     }
 
     /**
      * Get all counters for a given owner.
+     *
+     * @return array<string, int>
      */
     public static function allForOwner(Model $owner): array
     {
@@ -232,7 +289,6 @@ class ModelCounter extends Model
             ->pluck('count', 'period_start')
             ->toArray();
 
-        // Build result array with all periods (including zeros)
         $history = [];
         foreach ($periodStarts as $periodStart) {
             $periodKey = $interval->periodKey($periodStart);

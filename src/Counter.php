@@ -353,14 +353,16 @@ class Counter
         Cache::store(config('counter.store'))
             ->forget(static::redisKey($owner, $key, $interval, $periodStart));
 
-        // Execute the count within a transaction for safety
-        return DB::transaction(function () use ($owner, $key, $countCallback, $interval, $periodStart) {
-            $count = $countCallback();
+        // Run the user-supplied count outside the transaction. Counting a
+        // large source table can take seconds to minutes and holding a
+        // transaction open for that long blocks vacuum/replication.
+        $count = $countCallback();
 
+        DB::transaction(function () use ($owner, $key, $count, $interval, $periodStart) {
             ModelCounter::setValue($owner, $key, $count, $interval, $periodStart);
-
-            return $count;
         });
+
+        return $count;
     }
 
     /**
@@ -389,11 +391,11 @@ class Counter
             Cache::store(config('counter.store'))
                 ->forget(static::redisKey($owner, $key, $interval, $periodStart));
 
-            $count = DB::transaction(function () use ($owner, $key, $countCallback, $interval, $periodStart, $periodEnd) {
-                $count = $countCallback($periodStart, $periodEnd);
-                ModelCounter::setValue($owner, $key, $count, $interval, $periodStart);
+            // Count outside the transaction - see recount() for rationale.
+            $count = $countCallback($periodStart, $periodEnd);
 
-                return $count;
+            DB::transaction(function () use ($owner, $key, $count, $interval, $periodStart) {
+                ModelCounter::setValue($owner, $key, $count, $interval, $periodStart);
             });
 
             $results[$interval->periodKey($periodStart)] = $count;
