@@ -4,6 +4,7 @@ namespace Rejoose\ModelCounter\Console;
 
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Cache;
@@ -47,9 +48,17 @@ class SyncCounters extends Command
             return self::FAILURE;
         }
 
-        // Keep the lock key outside the `counter:` prefix range so it isn't
-        // picked up by the SCAN loop below.
-        $lock = Cache::lock('counter-sync-lock', (int) $this->option('lock-ttl'));
+        if (! $store instanceof LockProvider) {
+            $this->error("Cache store '{$storeName}' does not support locks.");
+
+            return self::FAILURE;
+        }
+
+        // Acquire the lock through the same store we're about to scan. Using
+        // the Cache facade would land on `cache.default`, which can differ
+        // from `counter.store` - two sync processes could then run
+        // concurrently against the same counter keyspace.
+        $lock = $store->lock('counter-sync-lock', (int) $this->option('lock-ttl'));
 
         try {
             if (! $lock->get()) {
@@ -93,12 +102,19 @@ class SyncCounters extends Command
 
         $searchPattern = $wirePrefix.($pattern ? $pattern.'*' : '*');
 
-        $keys = [];
         // phpredis (>=6.x) treats an initial cursor of 0 or "0" as "already
         // finished" and returns false without scanning. Passing null is the
         // only portable way to start an iteration.
         $cursor = null;
+        $totalFound = 0;
+        $synced = 0;
+        $skipped = 0;
+        $errors = 0;
 
+        // Process each SCAN batch as it comes back instead of accumulating
+        // all matching keys in memory first - at scale the keyspace can be
+        // in the millions and buffering all of it would blow up the sync
+        // worker.
         do {
             $result = $redis->scan($cursor, [
                 'match' => $searchPattern,
@@ -110,97 +126,32 @@ class SyncCounters extends Command
             }
 
             [$cursor, $foundKeys] = $result;
-            $keys = array_merge($keys, $foundKeys);
+
+            if (empty($foundKeys)) {
+                continue;
+            }
+
+            if ($totalFound === 0) {
+                $this->info('Streaming matched keys from Redis...');
+            }
+            $totalFound += count($foundKeys);
+
+            $this->processBatch(
+                $redis,
+                $foundKeys,
+                $connectionPrefix,
+                $logicalPrefix,
+                $isDryRun,
+                $synced,
+                $skipped,
+                $errors
+            );
         } while ((string) $cursor !== '0');
 
-        if (empty($keys)) {
+        if ($totalFound === 0) {
             $this->info('No counters found to sync.');
 
             return self::SUCCESS;
-        }
-
-        $this->info('Found '.count($keys).' counter(s) to sync.');
-
-        $synced = 0;
-        $skipped = 0;
-        $errors = 0;
-
-        foreach (array_chunk($keys, $batchSize) as $batchIndex => $batch) {
-            $this->info('Processing batch '.($batchIndex + 1).'...');
-
-            foreach ($batch as $wireKey) {
-                try {
-                    // SCAN returns keys with the connection-level prefix
-                    // included (phpredis default). Strip it so subsequent
-                    // GET/DECRBY calls - which go back through the same
-                    // connection that re-adds the prefix - don't double up.
-                    $rawKey = $connectionPrefix !== '' && str_starts_with($wireKey, $connectionPrefix)
-                        ? substr($wireKey, strlen($connectionPrefix))
-                        : $wireKey;
-
-                    $parsed = $this->parseRedisKey($rawKey, $logicalPrefix);
-
-                    if ($parsed === null) {
-                        $this->warn("Invalid key format: {$rawKey}");
-                        $errors++;
-
-                        continue;
-                    }
-
-                    // Counter::redisKey() encodes the owner type two different
-                    // ways: morph-map aliases are preserved verbatim, plain
-                    // FQCNs are lower-cased with backslashes replaced by dots.
-                    // DB rows store `$owner->getMorphClass()` (alias or real
-                    // FQCN), so we have to reverse the non-alias case to keep
-                    // insert rows aligned with future valueFor() lookups.
-                    $modelClass = $this->resolveModelClass($parsed['owner_type']);
-
-                    if ($modelClass === null) {
-                        $this->warn("Model class not found for: {$parsed['owner_type']}");
-                        $errors++;
-
-                        continue;
-                    }
-
-                    $dbOwnerType = Relation::getMorphedModel($parsed['owner_type']) !== null
-                        ? $parsed['owner_type']
-                        : $modelClass;
-
-                    // GET before DECRBY (not GETDEL): if the DB write fails
-                    // the delta stays in Redis and the next sync retries. The
-                    // only remaining lossy window is a crash between the DB
-                    // commit and the DECRBY call.
-                    $value = (int) $redis->get($rawKey);
-
-                    if ($value === 0) {
-                        $skipped++;
-
-                        continue;
-                    }
-
-                    if (! $isDryRun) {
-                        ModelCounter::addDeltaRaw(
-                            $dbOwnerType,
-                            $parsed['owner_id'],
-                            $parsed['counter_key'],
-                            $value,
-                            $parsed['interval'],
-                            $parsed['period_start']
-                        );
-
-                        $redis->decrby($rawKey, $value);
-                    }
-
-                    $intervalInfo = $parsed['interval']
-                        ? " [{$parsed['interval']->value}:{$parsed['period_key_str']}]"
-                        : '';
-                    $this->line("  ✓ {$dbOwnerType}#{$parsed['owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
-                    $synced++;
-                } catch (\Throwable $e) {
-                    $this->error("Error processing {$wireKey}: ".$e->getMessage());
-                    $errors++;
-                }
-            }
         }
 
         $this->newLine();
@@ -223,6 +174,94 @@ class SyncCounters extends Command
         }
 
         return $errors > 0 ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * @param  array<int, string>  $foundKeys
+     */
+    protected function processBatch(
+        object $redis,
+        array $foundKeys,
+        string $connectionPrefix,
+        string $logicalPrefix,
+        bool $isDryRun,
+        int &$synced,
+        int &$skipped,
+        int &$errors
+    ): void {
+        foreach ($foundKeys as $wireKey) {
+            try {
+                // SCAN returns keys with the connection-level prefix
+                // included (phpredis default). Strip it so subsequent
+                // GET/DECRBY calls - which go back through the same
+                // connection that re-adds the prefix - don't double up.
+                $rawKey = $connectionPrefix !== '' && str_starts_with($wireKey, $connectionPrefix)
+                    ? substr($wireKey, strlen($connectionPrefix))
+                    : $wireKey;
+
+                $parsed = $this->parseRedisKey($rawKey, $logicalPrefix);
+
+                if ($parsed === null) {
+                    $this->warn("Invalid key format: {$rawKey}");
+                    $errors++;
+
+                    continue;
+                }
+
+                // Counter::redisKey() encodes the owner type two different
+                // ways: morph-map aliases are preserved verbatim, plain
+                // FQCNs are lower-cased with backslashes replaced by dots.
+                // DB rows store `$owner->getMorphClass()` (alias or real
+                // FQCN), so we have to reverse the non-alias case to keep
+                // insert rows aligned with future valueFor() lookups.
+                $modelClass = $this->resolveModelClass($parsed['owner_type']);
+
+                if ($modelClass === null) {
+                    $this->warn("Model class not found for: {$parsed['owner_type']}");
+                    $errors++;
+
+                    continue;
+                }
+
+                $dbOwnerType = Relation::getMorphedModel($parsed['owner_type']) !== null
+                    ? $parsed['owner_type']
+                    : $modelClass;
+
+                // GET before DECRBY (not GETDEL): if the DB write fails
+                // the delta stays in Redis and the next sync retries. The
+                // only remaining lossy window is a crash between the DB
+                // commit and the DECRBY call.
+                $value = (int) $redis->get($rawKey);
+
+                if ($value === 0) {
+                    $skipped++;
+
+                    continue;
+                }
+
+                if (! $isDryRun) {
+                    ModelCounter::addDeltaRaw(
+                        $dbOwnerType,
+                        $parsed['owner_id'],
+                        $parsed['counter_key'],
+                        $value,
+                        $parsed['interval'],
+                        $parsed['period_start']
+                    );
+
+                    $redis->decrby($rawKey, $value);
+                }
+
+                $intervalInfo = $parsed['interval']
+                    ? " [{$parsed['interval']->value}:{$parsed['period_key_str']}]"
+                    : '';
+                $this->line("  ✓ {$dbOwnerType}#{$parsed['owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
+                $synced++;
+            } catch (\Throwable $e) {
+                $this->error("Error processing {$wireKey}: ".$e->getMessage());
+                $errors++;
+            }
+        }
     }
 
     /**
