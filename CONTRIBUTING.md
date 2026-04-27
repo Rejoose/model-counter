@@ -42,9 +42,11 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-* PHP 8.3 or higher
+* PHP 8.3 or higher with the following extensions:
+  * `pdo_sqlite` — required by the test suite (SQLite in-memory database)
+  * `redis` — required to run Redis-backed tests; otherwise the test suite falls back to the array cache store
 * Composer
-* Redis (for testing)
+* Redis 7+ (only needed for the sync command tests; in-memory tests work without it)
 
 ### Setup
 
@@ -54,12 +56,18 @@ git clone https://github.com/your-username/model-counter.git
 cd model-counter
 ```
 
-2. Install dependencies
+2. Install the required PHP extensions (Debian/Ubuntu/WSL)
+```bash
+sudo apt install php8.3-sqlite3 php8.3-redis
+```
+On macOS via Homebrew, `pdo_sqlite` ships with the `php` formula by default; install Redis via `brew install php-redis`.
+
+3. Install dependencies
 ```bash
 composer install
 ```
 
-3. Run tests
+4. Run tests
 ```bash
 composer test
 ```
