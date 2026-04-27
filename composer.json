@@ -1,5 +1,6 @@
 {
     "name": "rejoose/model-counter",
+    "version": "2.0.0",
     "description": "Ultra-efficient model counter package for Laravel with Redis-backed caching and scheduled DB syncing",
     "type": "library",
     "license": "MIT",
