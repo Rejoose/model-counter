@@ -4,7 +4,7 @@
 
 **Package:** `rejoose/model-counter` — A Laravel package for ultra-efficient model counting using Redis-backed caching with scheduled database synchronization. Tracks high-volume metrics (downloads, views, likes, visits) without database bottlenecks.
 
-**PHP:** ^8.3 | **Laravel:** 11.x / 12.x | **License:** MIT
+**PHP:** ^8.3 | **Laravel:** 13.x | **License:** MIT
 
 ## Architecture
 
@@ -90,7 +90,7 @@ php artisan counter:prune [--older-than=90] [--interval=day] [--dry-run]
 
 Defined in `.github/workflows/`:
 
-- **tests.yml** — Matrix: PHP 8.3/8.4 x Laravel 11/12 x prefer-lowest/prefer-stable. Runs Pest with Redis 7 service container. Uploads coverage to Codecov.
+- **tests.yml** — Matrix: PHP 8.3/8.4 x Laravel 13 x prefer-lowest/prefer-stable. Runs Pest with Redis 7 service container. Uploads coverage to Codecov.
 - **lint.yml** — Runs PHPStan and Pint in parallel.
 
 ## Key Patterns

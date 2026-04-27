@@ -40,8 +40,10 @@ class SyncCounters extends Command
         }
 
         // We require a Redis-backed store. Other drivers don't expose the
-        // SCAN/GET/DECRBY primitives this command relies on.
-        if (! method_exists($store, 'connection') || ! method_exists($store, 'getPrefix')) {
+        // SCAN/GET/DECRBY primitives this command relies on. (getPrefix is
+        // part of the Store contract since Laravel 13, so we only probe for
+        // the Redis-specific connection() accessor.)
+        if (! method_exists($store, 'connection')) {
             $this->error("Cache store '{$storeName}' is not supported by counter:sync.");
             $this->error('Use the Redis store for production, or set COUNTER_DIRECT=true.');
 

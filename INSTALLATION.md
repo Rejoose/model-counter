@@ -7,7 +7,7 @@ Complete installation guide for the Laravel Model Counter package.
 Before installing, ensure you have:
 
 - PHP 8.3 or higher
-- Laravel 11.x or 12.x
+- Laravel 13.x
 - Redis installed and running
 - Composer
 

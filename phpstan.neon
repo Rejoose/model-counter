@@ -8,6 +8,8 @@ parameters:
     excludePaths:
         - vendor
         - src/Filament
-    checkMissingIterableValueType: false
-    checkGenericClassInNonGenericObjectType: false
+    ignoreErrors:
+        -
+            identifier: trait.unused
+            path: src/Traits/HasCounters.php
 

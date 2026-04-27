@@ -27,7 +27,7 @@ Perfect for tracking downloads, views, likes, visits, or any metric that needs t
 ## 📋 Requirements
 
 - PHP 8.3+
-- Laravel 11.x or 12.x
+- Laravel 13.x
 - Redis (for caching)
 - Filament 4.x (optional, for admin panel)
 
