@@ -247,6 +247,45 @@ class CounterTest extends TestCase
         $this->assertEquals(240, $sum);
     }
 
+    public function test_sum_with_from_date_filters_older_periods(): void
+    {
+        ModelCounter::setValue($this->user, 'downloads', 100, Interval::Month, Carbon::parse('2024-06-01'));
+        ModelCounter::setValue($this->user, 'downloads', 80, Interval::Month, Carbon::parse('2024-05-01'));
+        ModelCounter::setValue($this->user, 'downloads', 60, Interval::Month, Carbon::parse('2024-04-01'));
+
+        $sum = Counter::sum($this->user, 'downloads', Interval::Month, Carbon::parse('2024-05-01'));
+
+        $this->assertEquals(180, $sum);
+    }
+
+    public function test_sum_with_to_date_filters_newer_periods(): void
+    {
+        ModelCounter::setValue($this->user, 'downloads', 100, Interval::Month, Carbon::parse('2024-06-01'));
+        ModelCounter::setValue($this->user, 'downloads', 80, Interval::Month, Carbon::parse('2024-05-01'));
+        ModelCounter::setValue($this->user, 'downloads', 60, Interval::Month, Carbon::parse('2024-04-01'));
+
+        $sum = Counter::sum($this->user, 'downloads', Interval::Month, null, Carbon::parse('2024-05-31'));
+
+        $this->assertEquals(140, $sum);
+    }
+
+    public function test_sum_with_from_and_to_returns_windowed_sum(): void
+    {
+        ModelCounter::setValue($this->user, 'downloads', 100, Interval::Month, Carbon::parse('2024-06-01'));
+        ModelCounter::setValue($this->user, 'downloads', 80, Interval::Month, Carbon::parse('2024-05-01'));
+        ModelCounter::setValue($this->user, 'downloads', 60, Interval::Month, Carbon::parse('2024-04-01'));
+
+        $sum = Counter::sum(
+            $this->user,
+            'downloads',
+            Interval::Month,
+            Carbon::parse('2024-05-01'),
+            Carbon::parse('2024-05-31')
+        );
+
+        $this->assertEquals(80, $sum);
+    }
+
     public function test_trait_interval_methods_work(): void
     {
         $this->user->incrementCounter('views', 10, Interval::Day);

@@ -105,11 +105,11 @@ trait HasCounters
     }
 
     /**
-     * Get sum across all periods for an interval-based counter.
+     * Get sum across all (or a date-bounded range of) periods for an interval-based counter.
      */
-    public function counterSum(string $key, Interval $interval): int
+    public function counterSum(string $key, Interval $interval, ?Carbon $from = null, ?Carbon $to = null): int
     {
-        return Counter::sum($this, $key, $interval);
+        return Counter::sum($this, $key, $interval, $from, $to);
     }
 
     /**

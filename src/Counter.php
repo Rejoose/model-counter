@@ -269,20 +269,33 @@ class Counter
     }
 
     /**
-     * Get sum across all periods for an interval-based counter.
+     * Get sum across all (or a date-bounded range of) periods for an interval-based counter.
      */
-    public static function sum(Model $owner, string $key, Interval $interval): int
-    {
+    public static function sum(
+        Model $owner,
+        string $key,
+        Interval $interval,
+        ?Carbon $from = null,
+        ?Carbon $to = null
+    ): int {
         static::validateKey($key);
 
-        $dbSum = ModelCounter::sumForInterval($owner, $key, $interval);
+        $dbSum = ModelCounter::sumForInterval($owner, $key, $interval, $from, $to);
 
         // In direct mode, all values are in the database
         if (config('counter.direct', false)) {
             return $dbSum;
         }
 
-        // Add current period's cached value
+        // Only add the Redis cache value if the current period falls within the requested range
+        $currentPeriodStart = $interval->periodStart();
+        $inRange = ($from === null || ! $currentPeriodStart->lt($from))
+            && ($to === null || ! $currentPeriodStart->gt($to));
+
+        if (! $inRange) {
+            return $dbSum;
+        }
+
         $cacheValue = Cache::store(config('counter.store'))
             ->get(static::redisKey($owner, $key, $interval), 0);
 

@@ -300,19 +300,31 @@ class ModelCounter extends Model
     }
 
     /**
-     * Get sum of counts across all periods for an interval-based counter.
+     * Get sum of counts across all (or a date-bounded range of) periods for an interval-based counter.
      */
     public static function sumForInterval(
         Model $owner,
         string $key,
-        Interval $interval
+        Interval $interval,
+        ?Carbon $from = null,
+        ?Carbon $to = null
     ): int {
-        return (int) static::where([
+        $query = static::where([
             'owner_type' => $owner->getMorphClass(),
             'owner_id' => $owner->getKey(),
             'key' => $key,
             'interval' => $interval->value,
-        ])->sum('count');
+        ]);
+
+        if ($from !== null) {
+            $query->where('period_start', '>=', $from->toDateString());
+        }
+
+        if ($to !== null) {
+            $query->where('period_start', '<=', $to->toDateString());
+        }
+
+        return (int) $query->sum('count');
     }
 
     /**
