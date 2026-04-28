@@ -6,7 +6,7 @@ Perfect for tracking downloads, views, likes, visits, or any metric that needs t
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PHP Version](https://img.shields.io/badge/PHP-8.3%2B-blue)](https://php.net)
-[![Laravel Version](https://img.shields.io/badge/Laravel-11%7C12-red)](https://laravel.com)
+[![Laravel Version](https://img.shields.io/badge/Laravel-13-red)](https://laravel.com)
 
 ## ✨ Features
 
@@ -715,9 +715,10 @@ CREATE TABLE model_counters (
     interval VARCHAR(20) NULL,
     period_start DATE NULL,
     count BIGINT UNSIGNED DEFAULT 0,
+    unique_hash CHAR(40) NOT NULL,
     created_at TIMESTAMP NULL,
     updated_at TIMESTAMP NULL,
-    UNIQUE KEY (owner_type, owner_id, key, interval, period_start),
+    UNIQUE KEY (unique_hash),
     INDEX (owner_type, owner_id),
     INDEX (key, interval, period_start)
 );

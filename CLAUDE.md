@@ -32,7 +32,7 @@ src/
   Traits/HasCounters.php       # Trait for models (counter methods + query scopes + bulk ops)
   Filament/                    # Optional Filament 4 admin panel integration
 config/counter.php             # Package configuration (store, direct, prefix, batch_size, table_name, events, retention)
-database/migrations/           # Three migrations: create table, add interval columns, add count index
+database/migrations/           # Four migrations: create table, add interval columns, add count index, add unique_hash column
 tests/
   Feature/CounterTest.php      # Core functionality + key validation + bulk ops + events tests
   Feature/PruneCountersTest.php    # Prune command tests
