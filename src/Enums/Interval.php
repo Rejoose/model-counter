@@ -96,4 +96,25 @@ enum Interval: string
 
         return $periods;
     }
+
+    /**
+     * Number of whole periods in [$from, $to] inclusive (period starts).
+     */
+    public function periodsBetween(Carbon $from, Carbon $to): int
+    {
+        $start = $this->periodStart($from);
+        $end = $this->periodStart($to);
+
+        if ($end->lt($start)) {
+            return 0;
+        }
+
+        return match ($this) {
+            self::Day => (int) $start->diffInDays($end) + 1,
+            self::Week => (int) $start->diffInWeeks($end) + 1,
+            self::Month => (int) $start->diffInMonths($end) + 1,
+            self::Quarter => (int) ($start->diffInMonths($end) / 3) + 1,
+            self::Year => (int) $start->diffInYears($end) + 1,
+        };
+    }
 }
