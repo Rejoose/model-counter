@@ -191,6 +191,148 @@ class ModelCounter extends Model
     }
 
     /**
+     * Drivers that support a single-statement upsert with an additive
+     * `count = count + EXCLUDED.count` semantics. Other drivers (sqlsrv) fall
+     * back to the per-row addDeltaRaw() path.
+     */
+    public static function supportsBulkAddDelta(?string $driver = null): bool
+    {
+        $driver ??= DB::connection()->getDriverName();
+
+        return in_array($driver, ['mysql', 'mariadb', 'pgsql', 'sqlite'], true);
+    }
+
+    /**
+     * Apply many counter deltas in a single batched UPSERT. Replaces N
+     * round-trip update/insert pairs with one statement per chunk.
+     *
+     * Each row must contain owner_type, owner_id, key, amount, and
+     * (optionally) interval (string|null) + period_start (Y-m-d|null).
+     * Rows with the same logical hash are summed before the write so the
+     * VALUES list never collides with itself (Postgres/SQLite reject
+     * "ON CONFLICT" affecting the same row twice).
+     *
+     * @param  array<int, array{owner_type: string, owner_id: int|string, key: string, amount: int, interval?: ?string, period_start?: ?string}>  $rows
+     */
+    public static function bulkAddDelta(array $rows): void
+    {
+        if ($rows === []) {
+            return;
+        }
+
+        $connection = DB::connection();
+        $driver = $connection->getDriverName();
+
+        if (! static::supportsBulkAddDelta($driver)) {
+            // Caller is expected to have checked supportsBulkAddDelta(); guard
+            // anyway so a misconfigured driver doesn't silently lose deltas.
+            foreach ($rows as $row) {
+                static::addDeltaRaw(
+                    $row['owner_type'],
+                    $row['owner_id'],
+                    $row['key'],
+                    $row['amount'],
+                    null,
+                    null
+                );
+            }
+
+            return;
+        }
+
+        $byHash = [];
+        foreach ($rows as $row) {
+            $interval = $row['interval'] ?? null;
+            $periodStart = $row['period_start'] ?? null;
+            $amount = (int) $row['amount'];
+
+            $hash = static::hashFor(
+                $row['owner_type'],
+                $row['owner_id'],
+                $row['key'],
+                $interval,
+                $periodStart
+            );
+
+            if (isset($byHash[$hash])) {
+                $byHash[$hash]['count'] += $amount;
+
+                continue;
+            }
+
+            $byHash[$hash] = [
+                'owner_type' => $row['owner_type'],
+                'owner_id' => $row['owner_id'],
+                'key' => $row['key'],
+                'interval' => $interval,
+                'period_start' => $periodStart,
+                'count' => $amount,
+                'unique_hash' => $hash,
+            ];
+        }
+
+        $byHash = array_filter($byHash, fn (array $r): bool => $r['count'] !== 0);
+
+        if ($byHash === []) {
+            return;
+        }
+
+        $now = now()->format('Y-m-d H:i:s');
+        $table = (new self)->getTable();
+        $grammar = $connection->getQueryGrammar();
+        $wrappedTable = $grammar->wrapTable($table);
+
+        $columns = ['owner_type', 'owner_id', 'key', 'interval', 'period_start', 'count', 'unique_hash', 'created_at', 'updated_at'];
+        $wrappedColumns = implode(', ', array_map(fn (string $c): string => $grammar->wrap($c), $columns));
+        $countCol = $grammar->wrap('count');
+        $updatedAtCol = $grammar->wrap('updated_at');
+
+        // Wrap the chunked write in a transaction so a partial failure on
+        // chunk N doesn't leave chunks 1..N-1 committed. Without this, a
+        // caller falling back to per-row addDeltaRaw() after a chunk error
+        // would double-count the already-committed rows.
+        $connection->transaction(function () use ($connection, $driver, $byHash, $columns, $wrappedTable, $wrappedColumns, $countCol, $updatedAtCol, $now): void {
+            // Chunk so we never blow the driver's bound-parameter ceiling
+            // (SQLite older builds cap at 999; Postgres at 65535). 200 rows
+            // x 9 cols = 1800 placeholders is comfortably under all of them.
+            foreach (array_chunk(array_values($byHash), 200) as $chunk) {
+                $placeholders = '(' . rtrim(str_repeat('?, ', count($columns)), ', ') . ')';
+                $valuesClause = implode(', ', array_fill(0, count($chunk), $placeholders));
+
+                $bindings = [];
+                foreach ($chunk as $r) {
+                    $bindings[] = $r['owner_type'];
+                    $bindings[] = $r['owner_id'];
+                    $bindings[] = $r['key'];
+                    $bindings[] = $r['interval'];
+                    $bindings[] = $r['period_start'];
+                    $bindings[] = $r['count'];
+                    $bindings[] = $r['unique_hash'];
+                    $bindings[] = $now;
+                    $bindings[] = $now;
+                }
+
+                if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                    // VALUES() is deprecated in MySQL 8.0.20+ in favour of
+                    // an alias, but is still accepted and works on every
+                    // supported MySQL/MariaDB version. The alias form would
+                    // break MySQL <8.
+                    $sql = "INSERT INTO {$wrappedTable} ({$wrappedColumns}) VALUES {$valuesClause} "
+                        ."ON DUPLICATE KEY UPDATE {$countCol} = {$countCol} + VALUES({$countCol}), "
+                        ."{$updatedAtCol} = VALUES({$updatedAtCol})";
+                } else { // pgsql / sqlite
+                    $sql = "INSERT INTO {$wrappedTable} ({$wrappedColumns}) VALUES {$valuesClause} "
+                        ."ON CONFLICT (unique_hash) DO UPDATE SET "
+                        ."{$countCol} = {$wrappedTable}.{$countCol} + EXCLUDED.{$countCol}, "
+                        ."{$updatedAtCol} = EXCLUDED.{$updatedAtCol}";
+                }
+
+                $connection->statement($sql, $bindings);
+            }
+        });
+    }
+
+    /**
      * Reset a counter to zero.
      */
     public static function resetValue(

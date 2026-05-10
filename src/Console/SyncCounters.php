@@ -21,6 +21,15 @@ class SyncCounters extends Command
 
     protected $description = 'Sync cached counter increments from Redis to the database';
 
+    /**
+     * Memoised resolveModelClass() output, scoped to a single command run.
+     * Typical sync batches re-resolve the same handful of owner types
+     * thousands of times; class_exists() / ReflectionClass aren't free.
+     *
+     * @var array<string, string|false>
+     */
+    protected array $modelClassCache = [];
+
     public function handle(): int
     {
         $isDryRun = (bool) $this->option('dry-run');
@@ -191,79 +200,240 @@ class SyncCounters extends Command
         int &$skipped,
         int &$errors
     ): void {
+        // Phase 1: parse keys and resolve owner types up-front so we know
+        // which raw keys need a Redis read. resolveModelClass() is memoised
+        // across the whole sync run because typical batches share a few
+        // owner types repeated thousands of times.
+        $parsedRows = [];
+        $rawKeysToRead = [];
+
         foreach ($foundKeys as $wireKey) {
-            try {
-                // SCAN returns keys with the connection-level prefix
-                // included (phpredis default). Strip it so subsequent
-                // GET/DECRBY calls - which go back through the same
-                // connection that re-adds the prefix - don't double up.
-                $rawKey = $connectionPrefix !== '' && str_starts_with($wireKey, $connectionPrefix)
-                    ? substr($wireKey, strlen($connectionPrefix))
-                    : $wireKey;
+            $rawKey = $connectionPrefix !== '' && str_starts_with($wireKey, $connectionPrefix)
+                ? substr($wireKey, strlen($connectionPrefix))
+                : $wireKey;
 
-                $parsed = $this->parseRedisKey($rawKey, $logicalPrefix);
+            $parsed = $this->parseRedisKey($rawKey, $logicalPrefix);
 
-                if ($parsed === null) {
-                    $this->warn("Invalid key format: {$rawKey}");
-                    $errors++;
+            if ($parsed === null) {
+                $this->warn("Invalid key format: {$rawKey}");
+                $errors++;
 
-                    continue;
-                }
+                continue;
+            }
 
-                // Counter::redisKey() encodes the owner type two different
-                // ways: morph-map aliases are preserved verbatim, plain
-                // FQCNs are lower-cased with backslashes replaced by dots.
-                // DB rows store `$owner->getMorphClass()` (alias or real
-                // FQCN), so we have to reverse the non-alias case to keep
-                // insert rows aligned with future valueFor() lookups.
-                $modelClass = $this->resolveModelClass($parsed['owner_type']);
+            // Counter::redisKey() encodes the owner type two different
+            // ways: morph-map aliases are preserved verbatim, plain
+            // FQCNs are lower-cased with backslashes replaced by dots.
+            // DB rows store `$owner->getMorphClass()` (alias or real
+            // FQCN), so we have to reverse the non-alias case to keep
+            // insert rows aligned with future valueFor() lookups.
+            $modelClass = $this->resolveModelClassCached($parsed['owner_type']);
 
-                if ($modelClass === null) {
-                    $this->warn("Model class not found for: {$parsed['owner_type']}");
-                    $errors++;
+            if ($modelClass === null) {
+                $this->warn("Model class not found for: {$parsed['owner_type']}");
+                $errors++;
 
-                    continue;
-                }
+                continue;
+            }
 
-                $dbOwnerType = Relation::getMorphedModel($parsed['owner_type']) !== null
-                    ? $parsed['owner_type']
-                    : $modelClass;
+            $dbOwnerType = Relation::getMorphedModel($parsed['owner_type']) !== null
+                ? $parsed['owner_type']
+                : $modelClass;
 
-                // GET before DECRBY (not GETDEL): if the DB write fails
-                // the delta stays in Redis and the next sync retries. The
-                // only remaining lossy window is a crash between the DB
-                // commit and the DECRBY call.
-                $value = (int) $redis->get($rawKey);
+            $parsedRows[] = [
+                'wire_key' => $wireKey,
+                'raw_key' => $rawKey,
+                'parsed' => $parsed,
+                'db_owner_type' => $dbOwnerType,
+            ];
+            $rawKeysToRead[] = $rawKey;
+        }
 
-                if ($value === 0) {
-                    $skipped++;
+        if ($parsedRows === []) {
+            return;
+        }
 
-                    continue;
-                }
+        // Phase 2: pipeline all GETs in a single round trip instead of one
+        // GET per key. GET (not GETDEL) is intentional: if the DB write
+        // fails the delta stays in Redis and the next sync retries. The
+        // remaining lossy window is a crash between the DB commit and the
+        // DECRBY pipeline below.
+        $values = $this->pipelineGet($redis, $rawKeysToRead);
 
-                if (! $isDryRun) {
-                    ModelCounter::addDeltaRaw(
-                        $dbOwnerType,
-                        $parsed['owner_id'],
-                        $parsed['counter_key'],
-                        $value,
-                        $parsed['interval'],
-                        $parsed['period_start']
-                    );
+        // Phase 3: build the batched delta payload and the DECRBY plan.
+        $deltas = [];
+        $decrPlan = [];
 
-                    $redis->decrby($rawKey, $value);
-                }
+        foreach ($parsedRows as $i => $row) {
+            $value = (int) ($values[$i] ?? 0);
 
+            if ($value === 0) {
+                $skipped++;
+
+                continue;
+            }
+
+            $parsed = $row['parsed'];
+            $deltas[] = [
+                'owner_type' => $row['db_owner_type'],
+                'owner_id' => $parsed['owner_id'],
+                'key' => $parsed['counter_key'],
+                'amount' => $value,
+                'interval' => $parsed['interval']?->value,
+                'period_start' => $parsed['period_start']?->toDateString(),
+            ];
+            $decrPlan[] = [$row['raw_key'], $value];
+
+            if ($this->output->isVerbose()) {
                 $intervalInfo = $parsed['interval']
                     ? " [{$parsed['interval']->value}:{$parsed['period_key_str']}]"
                     : '';
-                $this->line("  ✓ {$dbOwnerType}#{$parsed['owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
-                $synced++;
-            } catch (\Throwable $e) {
-                $this->error("Error processing {$wireKey}: ".$e->getMessage());
-                $errors++;
+                $this->line("  ✓ {$row['db_owner_type']}#{$parsed['owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
             }
         }
+
+        if ($deltas === []) {
+            return;
+        }
+
+        if ($isDryRun) {
+            $synced += count($deltas);
+
+            return;
+        }
+
+        // Phase 4: one batched UPSERT for the whole batch. On unsupported
+        // drivers (sqlsrv) bulkAddDelta() falls through to the per-row
+        // path. On SQL failure we re-run per-row so a single bad row
+        // doesn't fail the entire batch - matches the previous
+        // try/catch-per-key behaviour.
+        try {
+            if (ModelCounter::supportsBulkAddDelta()) {
+                ModelCounter::bulkAddDelta($deltas);
+            } else {
+                foreach ($deltas as $delta) {
+                    ModelCounter::addDeltaRaw(
+                        $delta['owner_type'],
+                        $delta['owner_id'],
+                        $delta['key'],
+                        $delta['amount'],
+                        $delta['interval'] !== null ? Interval::from($delta['interval']) : null,
+                        $delta['period_start'] !== null ? Carbon::parse($delta['period_start']) : null,
+                    );
+                }
+            }
+        } catch (\Throwable $bulkError) {
+            $this->warn('Bulk upsert failed, retrying per row: '.$bulkError->getMessage());
+            $localErrors = 0;
+
+            foreach ($deltas as $idx => $delta) {
+                try {
+                    ModelCounter::addDeltaRaw(
+                        $delta['owner_type'],
+                        $delta['owner_id'],
+                        $delta['key'],
+                        $delta['amount'],
+                        $delta['interval'] !== null ? Interval::from($delta['interval']) : null,
+                        $delta['period_start'] !== null ? Carbon::parse($delta['period_start']) : null,
+                    );
+                } catch (\Throwable $e) {
+                    $this->error("Error syncing {$delta['owner_type']}#{$delta['owner_id']}[{$delta['key']}]: ".$e->getMessage());
+                    unset($decrPlan[$idx]);
+                    $localErrors++;
+                }
+            }
+
+            $errors += $localErrors;
+        }
+
+        // Phase 5: pipeline DECRBYs. Rows are already committed to the DB,
+        // so a DECRBY failure here means "synced but Redis still has the
+        // delta". The next sync will re-read those values and double-count.
+        // We surface that as a warning + error count rather than rolling
+        // back the (already-durable) DB writes.
+        if ($decrPlan !== []) {
+            try {
+                $this->pipelineDecrBy($redis, array_values($decrPlan));
+            } catch (\Throwable $e) {
+                $this->warn('DECRBY pipeline failed (DB already committed, may double-count next sync): '.$e->getMessage());
+                $errors += count($decrPlan);
+            }
+        }
+
+        $synced += count($decrPlan);
+    }
+
+    /**
+     * Run GET for many keys in a single Redis round trip. Falls back to
+     * sequential GETs if pipelining isn't available on the underlying
+     * client (predis/phpredis both expose pipeline() through Laravel's
+     * connection wrapper, so the fallback is mostly defensive).
+     *
+     * @param  array<int, string>  $rawKeys
+     * @return array<int, mixed>
+     */
+    protected function pipelineGet(object $redis, array $rawKeys): array
+    {
+        if ($rawKeys === []) {
+            return [];
+        }
+
+        if (method_exists($redis, 'pipeline')) {
+            $results = $redis->pipeline(function ($pipe) use ($rawKeys): void {
+                foreach ($rawKeys as $key) {
+                    $pipe->get($key);
+                }
+            });
+
+            return is_array($results) ? array_values($results) : [];
+        }
+
+        $out = [];
+        foreach ($rawKeys as $key) {
+            $out[] = $redis->get($key);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Run DECRBY for many keys in a single Redis round trip.
+     *
+     * @param  array<int, array{0: string, 1: int}>  $plan
+     */
+    protected function pipelineDecrBy(object $redis, array $plan): void
+    {
+        if ($plan === []) {
+            return;
+        }
+
+        if (method_exists($redis, 'pipeline')) {
+            $redis->pipeline(function ($pipe) use ($plan): void {
+                foreach ($plan as [$key, $amount]) {
+                    $pipe->decrby($key, $amount);
+                }
+            });
+
+            return;
+        }
+
+        foreach ($plan as [$key, $amount]) {
+            $redis->decrby($key, $amount);
+        }
+    }
+
+    protected function resolveModelClassCached(string $ownerType): ?string
+    {
+        if (array_key_exists($ownerType, $this->modelClassCache)) {
+            $cached = $this->modelClassCache[$ownerType];
+
+            return $cached === false ? null : $cached;
+        }
+
+        $resolved = $this->resolveModelClass($ownerType);
+        $this->modelClassCache[$ownerType] = $resolved ?? false;
+
+        return $resolved;
     }
 
     /**
