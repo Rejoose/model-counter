@@ -226,14 +226,21 @@ class ModelCounter extends Model
         if (! static::supportsBulkAddDelta($driver)) {
             // Caller is expected to have checked supportsBulkAddDelta(); guard
             // anyway so a misconfigured driver doesn't silently lose deltas.
+            // The row payload uses the wire format (interval as string|null,
+            // period_start as Y-m-d|null), so reconstruct the rich types
+            // before delegating - otherwise interval-based deltas would be
+            // committed as non-interval rows and corrupt the counter.
             foreach ($rows as $row) {
+                $intervalString = $row['interval'] ?? null;
+                $periodStartString = $row['period_start'] ?? null;
+
                 static::addDeltaRaw(
                     $row['owner_type'],
                     $row['owner_id'],
                     $row['key'],
                     $row['amount'],
-                    null,
-                    null
+                    $intervalString !== null ? Interval::from($intervalString) : null,
+                    $periodStartString !== null ? Carbon::parse($periodStartString) : null,
                 );
             }
 

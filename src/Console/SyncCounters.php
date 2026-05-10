@@ -258,7 +258,36 @@ class SyncCounters extends Command
         // fails the delta stays in Redis and the next sync retries. The
         // remaining lossy window is a crash between the DB commit and the
         // DECRBY pipeline below.
-        $values = $this->pipelineGet($redis, $rawKeysToRead);
+        //
+        // A pipelined Redis call aborts on the first command that errors
+        // (e.g. WRONGTYPE on a poisoned key matching the prefix), so a
+        // single bad key would otherwise kill the entire sync. Fall back
+        // to per-key GETs so the offending key can be isolated and the
+        // batch can continue.
+        try {
+            $values = $this->pipelineGet($redis, $rawKeysToRead);
+        } catch (\Throwable $e) {
+            $this->warn('GET pipeline failed, falling back to per-key reads: '.$e->getMessage());
+
+            $survivingRows = [];
+            $survivingValues = [];
+            foreach ($rawKeysToRead as $i => $rawKey) {
+                try {
+                    $survivingValues[] = $redis->get($rawKey);
+                    $survivingRows[] = $parsedRows[$i];
+                } catch (\Throwable $perKey) {
+                    $this->error("Error reading {$rawKey}: ".$perKey->getMessage());
+                    $errors++;
+                }
+            }
+
+            $parsedRows = $survivingRows;
+            $values = $survivingValues;
+
+            if ($parsedRows === []) {
+                return;
+            }
+        }
 
         // Phase 3: build the batched delta payload and the DECRBY plan.
         $deltas = [];
