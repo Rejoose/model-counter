@@ -514,6 +514,64 @@ Counter::decrementMany($user, ['credits' => 5, 'tokens' => 10]);
 $values = Counter::getMany($user, ['views', 'downloads', 'likes']);
 ```
 
+### Bulk Backfill / Historical Seeding
+
+`Counter::bulkSet()` writes many absolute counter values in a single batched
+`UPSERT` per ~200 rows. Use it to seed historical data, apply pre-aggregated
+source counts, or run a fast backfill — orders of magnitude faster than
+looping `Counter::set()` per row because it collapses the per-row
+SELECT + UPDATE/INSERT round-trips into one statement.
+
+Typical pattern: one aggregate query per source table, then one `bulkSet()`
+call per chunk.
+
+```php
+use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
+use Rejoose\ModelCounter\Counter;
+use Rejoose\ModelCounter\Enums\Interval;
+
+// Aggregate the source-of-truth counts in a single query.
+$buckets = DB::table('orders')
+    ->selectRaw('user_id, DATE(created_at) AS day, COUNT(*) AS c')
+    ->whereBetween('created_at', [now()->subYear(), now()])
+    ->groupBy('user_id', 'day')
+    ->get();
+
+$rows = $buckets->map(fn ($b) => [
+    'owner_type'   => (new User)->getMorphClass(),
+    'owner_id'     => $b->user_id,
+    'key'          => 'orders_created',
+    'count'        => (int) $b->c,
+    'interval'     => Interval::Day,
+    'period_start' => $b->day,        // Carbon or Y-m-d string
+])->all();
+
+Counter::bulkSet($rows, skipZero: true);
+```
+
+**Semantics worth knowing**
+
+- **Absolute set, not additive.** `bulkSet` overwrites existing counter rows
+  with the supplied count. For incremental updates use `Counter::increment()`
+  or — when batching the sync flush internally — `ModelCounter::bulkAddDelta()`.
+- **Last write wins.** If the same `(owner, key, interval, period)` appears
+  twice in the input, the last entry replaces earlier ones. This avoids the
+  "ON CONFLICT cannot affect row twice" error on Postgres/SQLite.
+- **Cache is always invalidated.** Every input row clears the matching cache
+  key, including rows skipped via `skipZero`. Otherwise a stale Redis delta
+  could survive on top of an absent DB baseline and corrupt the next `get()`.
+- **`skipZero`** drops rows where `count === 0` from the DB write while
+  still invalidating their cache key. Useful for sparse backfills — for a
+  year of daily data you typically only persist the days that had activity.
+- **Driver support.** Single-statement upsert runs on MySQL / MariaDB /
+  PostgreSQL / SQLite. On other drivers (`sqlsrv`) the method falls back to
+  a per-row `setValue()` loop. Check with `ModelCounter::supportsBulkSetValue()`.
+
+The lower-level `ModelCounter::bulkSetValue()` is also exposed if you want
+to do your own cache invalidation. The `Counter::bulkSet()` wrapper handles
+that for you and is the recommended entry point.
+
 ### Manual Sync
 
 You can manually trigger a sync anytime:

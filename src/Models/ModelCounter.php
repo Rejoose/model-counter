@@ -303,7 +303,7 @@ class ModelCounter extends Model
             // (SQLite older builds cap at 999; Postgres at 65535). 200 rows
             // x 9 cols = 1800 placeholders is comfortably under all of them.
             foreach (array_chunk(array_values($byHash), 200) as $chunk) {
-                $placeholders = '(' . rtrim(str_repeat('?, ', count($columns)), ', ') . ')';
+                $placeholders = '('.rtrim(str_repeat('?, ', count($columns)), ', ').')';
                 $valuesClause = implode(', ', array_fill(0, count($chunk), $placeholders));
 
                 $bindings = [];
@@ -329,8 +329,150 @@ class ModelCounter extends Model
                         ."{$updatedAtCol} = VALUES({$updatedAtCol})";
                 } else { // pgsql / sqlite
                     $sql = "INSERT INTO {$wrappedTable} ({$wrappedColumns}) VALUES {$valuesClause} "
-                        ."ON CONFLICT (unique_hash) DO UPDATE SET "
+                        .'ON CONFLICT (unique_hash) DO UPDATE SET '
                         ."{$countCol} = {$wrappedTable}.{$countCol} + EXCLUDED.{$countCol}, "
+                        ."{$updatedAtCol} = EXCLUDED.{$updatedAtCol}";
+                }
+
+                $connection->statement($sql, $bindings);
+            }
+        });
+    }
+
+    /**
+     * Drivers that support a single-statement bulk absolute SET. Same set as
+     * supportsBulkAddDelta() — both rely on ON CONFLICT/ON DUPLICATE KEY
+     * UPDATE. Other drivers (sqlsrv) fall back to per-row setValue().
+     */
+    public static function supportsBulkSetValue(?string $driver = null): bool
+    {
+        return static::supportsBulkAddDelta($driver);
+    }
+
+    /**
+     * Apply many absolute counter SETs in a single batched UPSERT. Replaces N
+     * SELECT+UPDATE/INSERT round-trips with one statement per chunk.
+     *
+     * Unlike {@see bulkAddDelta()} which adds (count = count + EXCLUDED.count),
+     * this overwrites (count = EXCLUDED.count). Use it to seed historical
+     * periods or to apply recount results in bulk.
+     *
+     * If the same logical hash appears multiple times in the input, the LAST
+     * occurrence wins. This matches the natural "last write wins" semantics
+     * callers expect from a SET operation, and avoids the
+     * "ON CONFLICT cannot affect row twice" error from Postgres/SQLite.
+     *
+     * Each row must contain owner_type, owner_id, key, count, and (optionally)
+     * interval (string|null) + period_start (Y-m-d|null).
+     *
+     * @param  array<int, array{owner_type: string, owner_id: int|string, key: string, count: int, interval?: ?string, period_start?: ?string}>  $rows
+     */
+    public static function bulkSetValue(array $rows): void
+    {
+        if ($rows === []) {
+            return;
+        }
+
+        $connection = DB::connection();
+        $driver = $connection->getDriverName();
+
+        if (! static::supportsBulkSetValue($driver)) {
+            // Fall back to the per-row setValue path. We need a loaded owner
+            // model for setValue(), so this branch is best-effort: skip rows
+            // whose owner can't be hydrated rather than corrupt them with a
+            // missing owner_type.
+            foreach ($rows as $row) {
+                $intervalString = $row['interval'] ?? null;
+                $periodStartString = $row['period_start'] ?? null;
+                $ownerClass = $row['owner_type'];
+
+                if (! class_exists($ownerClass)) {
+                    continue;
+                }
+
+                $owner = $ownerClass::find($row['owner_id']);
+                if ($owner === null) {
+                    continue;
+                }
+
+                static::setValue(
+                    $owner,
+                    $row['key'],
+                    (int) $row['count'],
+                    $intervalString !== null ? Interval::from($intervalString) : null,
+                    $periodStartString !== null ? Carbon::parse($periodStartString) : null,
+                );
+            }
+
+            return;
+        }
+
+        $byHash = [];
+        foreach ($rows as $row) {
+            $interval = $row['interval'] ?? null;
+            $periodStart = $row['period_start'] ?? null;
+            $count = (int) $row['count'];
+
+            $hash = static::hashFor(
+                $row['owner_type'],
+                $row['owner_id'],
+                $row['key'],
+                $interval,
+                $periodStart
+            );
+
+            // Last write wins — overwrite any previous payload for this hash.
+            $byHash[$hash] = [
+                'owner_type' => $row['owner_type'],
+                'owner_id' => $row['owner_id'],
+                'key' => $row['key'],
+                'interval' => $interval,
+                'period_start' => $periodStart,
+                'count' => $count,
+                'unique_hash' => $hash,
+            ];
+        }
+
+        $now = now()->format('Y-m-d H:i:s');
+        $table = (new self)->getTable();
+        $grammar = $connection->getQueryGrammar();
+        $wrappedTable = $grammar->wrapTable($table);
+
+        $columns = ['owner_type', 'owner_id', 'key', 'interval', 'period_start', 'count', 'unique_hash', 'created_at', 'updated_at'];
+        $wrappedColumns = implode(', ', array_map(fn (string $c): string => $grammar->wrap($c), $columns));
+        $countCol = $grammar->wrap('count');
+        $updatedAtCol = $grammar->wrap('updated_at');
+
+        // Wrap chunked writes in a transaction so a partial failure doesn't
+        // commit an inconsistent subset of the backfill.
+        $connection->transaction(function () use ($connection, $driver, $byHash, $columns, $wrappedTable, $wrappedColumns, $countCol, $updatedAtCol, $now): void {
+            // 200 rows × 9 cols = 1800 placeholders — comfortably under SQLite
+            // (999 historical / 32k modern) and Postgres (65535) limits.
+            foreach (array_chunk(array_values($byHash), 200) as $chunk) {
+                $placeholders = '('.rtrim(str_repeat('?, ', count($columns)), ', ').')';
+                $valuesClause = implode(', ', array_fill(0, count($chunk), $placeholders));
+
+                $bindings = [];
+                foreach ($chunk as $r) {
+                    $bindings[] = $r['owner_type'];
+                    $bindings[] = $r['owner_id'];
+                    $bindings[] = $r['key'];
+                    $bindings[] = $r['interval'];
+                    $bindings[] = $r['period_start'];
+                    $bindings[] = $r['count'];
+                    $bindings[] = $r['unique_hash'];
+                    $bindings[] = $now;
+                    $bindings[] = $now;
+                }
+
+                if (in_array($driver, ['mysql', 'mariadb'], true)) {
+                    $sql = "INSERT INTO {$wrappedTable} ({$wrappedColumns}) VALUES {$valuesClause} "
+                        ."ON DUPLICATE KEY UPDATE {$countCol} = VALUES({$countCol}), "
+                        ."{$updatedAtCol} = VALUES({$updatedAtCol})";
+                } else { // pgsql / sqlite
+                    $sql = "INSERT INTO {$wrappedTable} ({$wrappedColumns}) VALUES {$valuesClause} "
+                        .'ON CONFLICT (unique_hash) DO UPDATE SET '
+                        ."{$countCol} = EXCLUDED.{$countCol}, "
                         ."{$updatedAtCol} = EXCLUDED.{$updatedAtCol}";
                 }
 

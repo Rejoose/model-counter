@@ -344,6 +344,118 @@ class Counter
     }
 
     /**
+     * Bulk set many absolute counter values in a single batched UPSERT.
+     *
+     * Use this to seed historical data, apply pre-aggregated source counts,
+     * or run a fast backfill. One SQL statement per ~200 rows replaces the
+     * per-row SELECT + UPDATE/INSERT loop that {@see set()} performs.
+     *
+     * Cache invalidation runs for *every* input row, including count=0 and
+     * including rows skipped via $skipZero. Skipping the DB write while
+     * leaving a stale Redis delta in place would let `get()` return the
+     * wrong value, so the cache is cleared unconditionally.
+     *
+     * Each input row:
+     *   - owner_type:   string (the morph class as stored — e.g. "App\\Models\\User" or a morph-map alias)
+     *   - owner_id:     int|string
+     *   - key:          string
+     *   - interval:     Interval|string|null (enum, value, or null for global)
+     *   - period_start: Carbon|string|null   (Carbon, Y-m-d string, or null for global)
+     *   - count:        int                  (absolute value, not a delta)
+     *
+     * If the same logical (owner, key, interval, period) appears more than once
+     * in the input, the last occurrence wins — matching natural SET semantics.
+     *
+     * @param  array<int, array{owner_type: string, owner_id: int|string, key: string, count: int, interval?: Interval|string|null, period_start?: Carbon|string|null}>  $rows
+     * @return int Number of rows written to the database after filtering.
+     */
+    public static function bulkSet(array $rows, bool $skipZero = false): int
+    {
+        if ($rows === []) {
+            return 0;
+        }
+
+        $store = Cache::store(config('counter.store'));
+        $prepared = [];
+
+        foreach ($rows as $row) {
+            $key = $row['key'];
+            static::validateKey($key);
+
+            $intervalRaw = $row['interval'] ?? null;
+            $interval = $intervalRaw instanceof Interval
+                ? $intervalRaw
+                : ($intervalRaw !== null ? Interval::from($intervalRaw) : null);
+
+            $periodStartInput = $row['period_start'] ?? null;
+            $periodStart = null;
+            $periodStartDate = null;
+
+            if ($interval !== null) {
+                $periodStart = $periodStartInput instanceof Carbon
+                    ? $periodStartInput
+                    : ($periodStartInput !== null ? Carbon::parse($periodStartInput) : $interval->periodStart());
+                $periodStartDate = $periodStart->toDateString();
+            }
+
+            // Invalidate cache regardless of skipZero. Skipping the DB write
+            // while leaving a stale Redis delta would let get() return the
+            // wrong value on the next read.
+            $store->forget(self::redisKeyRaw(
+                $row['owner_type'],
+                $row['owner_id'],
+                $key,
+                $interval,
+                $periodStart,
+            ));
+
+            $count = (int) $row['count'];
+            if ($skipZero && $count === 0) {
+                continue;
+            }
+
+            $prepared[] = [
+                'owner_type' => $row['owner_type'],
+                'owner_id' => $row['owner_id'],
+                'key' => $key,
+                'interval' => $interval?->value,
+                'period_start' => $periodStartDate,
+                'count' => $count,
+            ];
+        }
+
+        ModelCounter::bulkSetValue($prepared);
+
+        return count($prepared);
+    }
+
+    /**
+     * Build the same cache key that {@see redisKey()} produces, but from raw
+     * morph values so bulk callers don't need to hydrate an owner model per
+     * row.
+     */
+    private static function redisKeyRaw(
+        string $ownerType,
+        int|string $ownerId,
+        string $key,
+        ?Interval $interval = null,
+        ?Carbon $periodStart = null
+    ): string {
+        $morphClass = strtolower(str_replace('\\', '.', $ownerType));
+
+        $baseKey = config('counter.prefix')
+            .$morphClass.':'
+            .$ownerId.':'
+            .$key;
+
+        if ($interval !== null) {
+            return $baseKey.':'.$interval->value.':'.$interval->periodKey($periodStart);
+        }
+
+        return $baseKey;
+    }
+
+    /**
      * Recount a counter by executing a callback that returns the new count.
      *
      * This is a safe operation that:

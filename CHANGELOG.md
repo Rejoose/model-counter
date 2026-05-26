@@ -2,6 +2,13 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.3.0] - 2026-05-26
+
+### Added
+- `Counter::bulkSet(array $rows, bool $skipZero = false): int` — write many absolute counter values in a single batched UPSERT per ~200 rows. Designed for historical backfills and pre-aggregated seed data; orders of magnitude faster than looping `Counter::set()`. Always invalidates the matching cache key per row (including zero rows and rows dropped by `skipZero`) so a stale Redis delta can't survive the write.
+- `ModelCounter::bulkSetValue(array $rows): void` — lower-level absolute-set primitive used by `Counter::bulkSet()`. Mirrors `bulkAddDelta()` but overwrites (`count = EXCLUDED.count`) instead of adding. Last-write-wins for duplicate hashes in the input. Supports MySQL / MariaDB / PostgreSQL / SQLite; falls back to per-row `setValue()` on other drivers.
+- `ModelCounter::supportsBulkSetValue(?string $driver = null): bool` — driver-support probe matching `supportsBulkAddDelta()`.
+
 ## [2.0.0] - 2026-04-27
 
 ### Breaking Changes
