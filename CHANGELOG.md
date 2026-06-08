@@ -2,6 +2,13 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.4.0] - 2026-06-08
+
+### Added
+- **Global (ownerless) counters.** App-wide counters that belong to no model, stored with `NULL` owner_type / owner_id. New facade methods `Counter::incrementGlobal/decrementGlobal/getGlobal/getManyGlobal/setGlobal/resetGlobal/sumGlobal/historyGlobal/deleteGlobal`. All owner-keyed `Counter` and `ModelCounter` methods now accept a nullable owner (`?Model`); passing `null` targets the global counter. On the Redis wire global counters use a reserved `global:0` owner token (so `counter:sync`'s colon-split is unaffected), translated back to a `NULL` owner on flush. Requires the new `make_owner_nullable_on_model_counters_table` migration.
+- **Gauge / snapshot API.** `Counter::snapshot()` / `Counter::snapshotGlobal()` record an *absolute* value for a period (intent-revealing aliases over `set()` with an explicit period — last-write-wins, idempotent per period). `Counter::latest()` / `Counter::latestGlobal()` read the most recent snapshot for an interval. Designed for daily cumulative-total snapshots feeding trend charts.
+- **`counter:recount {model}` command.** Recounts every counter declared by a `DefinesCounters` model from its source-of-truth closures, chunking over the model's records (`--id`, `--from`, `--to`, `--chunk`). Replaces per-app hand-rolled recount loops.
+
 ## [2.3.0] - 2026-05-26
 
 ### Added

@@ -3,6 +3,7 @@
 namespace Rejoose\ModelCounter\Models;
 
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Rejoose\ModelCounter\Enums\Interval;
@@ -71,8 +72,8 @@ class ModelCounter extends Model
      * model_counters_unique constraint.
      */
     public static function hashFor(
-        string $ownerType,
-        int|string $ownerId,
+        ?string $ownerType,
+        int|string|null $ownerId,
         string $key,
         ?string $interval,
         Carbon|string|null $periodStart
@@ -91,17 +92,35 @@ class ModelCounter extends Model
     }
 
     /**
+     * Start a query constrained to a given owner. A null owner targets the
+     * global (ownerless) rows where owner_type / owner_id are NULL.
+     *
+     * @return Builder<static>
+     */
+    protected static function ownerQuery(?string $ownerType, int|string|null $ownerId): Builder
+    {
+        $query = static::query();
+
+        if ($ownerType === null) {
+            return $query->whereNull('owner_type')->whereNull('owner_id');
+        }
+
+        return $query->where('owner_type', $ownerType)->where('owner_id', $ownerId);
+    }
+
+    /**
      * Get the current counter value from the database for a given owner and key.
+     * A null owner reads the global (ownerless) counter.
      */
     public static function valueFor(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): int {
         $hash = static::hashFor(
-            $owner->getMorphClass(),
-            $owner->getKey(),
+            $owner?->getMorphClass(),
+            $owner?->getKey(),
             $key,
             $interval?->value,
             $interval !== null ? ($periodStart ?? $interval->periodStart()) : null
@@ -114,15 +133,15 @@ class ModelCounter extends Model
      * Add a delta to an existing counter (or create it if it doesn't exist).
      */
     public static function addDelta(
-        Model $owner,
+        ?Model $owner,
         string $key,
         int $amount,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): void {
         static::addDeltaRaw(
-            $owner->getMorphClass(),
-            $owner->getKey(),
+            $owner?->getMorphClass(),
+            $owner?->getKey(),
             $key,
             $amount,
             $interval,
@@ -135,8 +154,8 @@ class ModelCounter extends Model
      * don't pay for N `Model::find()` lookups per batch.
      */
     public static function addDeltaRaw(
-        string $ownerType,
-        int|string $ownerId,
+        ?string $ownerType,
+        int|string|null $ownerId,
         string $key,
         int $amount,
         ?Interval $interval = null,
@@ -212,7 +231,7 @@ class ModelCounter extends Model
      * VALUES list never collides with itself (Postgres/SQLite reject
      * "ON CONFLICT" affecting the same row twice).
      *
-     * @param  array<int, array{owner_type: string, owner_id: int|string, key: string, amount: int, interval?: ?string, period_start?: ?string}>  $rows
+     * @param  array<int, array{owner_type: ?string, owner_id: int|string|null, key: string, amount: int, interval?: ?string, period_start?: ?string}>  $rows
      */
     public static function bulkAddDelta(array $rows): void
     {
@@ -365,7 +384,7 @@ class ModelCounter extends Model
      * Each row must contain owner_type, owner_id, key, count, and (optionally)
      * interval (string|null) + period_start (Y-m-d|null).
      *
-     * @param  array<int, array{owner_type: string, owner_id: int|string, key: string, count: int, interval?: ?string, period_start?: ?string}>  $rows
+     * @param  array<int, array{owner_type: ?string, owner_id: int|string|null, key: string, count: int, interval?: ?string, period_start?: ?string}>  $rows
      */
     public static function bulkSetValue(array $rows): void
     {
@@ -385,6 +404,19 @@ class ModelCounter extends Model
                 $intervalString = $row['interval'] ?? null;
                 $periodStartString = $row['period_start'] ?? null;
                 $ownerClass = $row['owner_type'];
+
+                // Global (ownerless) rows have no model to hydrate.
+                if ($ownerClass === null) {
+                    static::setValue(
+                        null,
+                        $row['key'],
+                        (int) $row['count'],
+                        $intervalString !== null ? Interval::from($intervalString) : null,
+                        $periodStartString !== null ? Carbon::parse($periodStartString) : null,
+                    );
+
+                    continue;
+                }
 
                 if (! class_exists($ownerClass)) {
                     continue;
@@ -485,7 +517,7 @@ class ModelCounter extends Model
      * Reset a counter to zero.
      */
     public static function resetValue(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
@@ -494,10 +526,11 @@ class ModelCounter extends Model
     }
 
     /**
-     * Set a counter to a specific value.
+     * Set a counter to a specific value. A null owner writes the global
+     * (ownerless) counter.
      */
     public static function setValue(
-        Model $owner,
+        ?Model $owner,
         string $key,
         int $value,
         ?Interval $interval = null,
@@ -509,8 +542,8 @@ class ModelCounter extends Model
         }
 
         $hash = static::hashFor(
-            $owner->getMorphClass(),
-            $owner->getKey(),
+            $owner?->getMorphClass(),
+            $owner?->getKey(),
             $key,
             $interval?->value,
             $periodStartDate
@@ -528,8 +561,8 @@ class ModelCounter extends Model
         // when the `creating` event listener is suppressed by Event::fake()
         // in tests.
         static::create([
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
+            'owner_type' => $owner?->getMorphClass(),
+            'owner_id' => $owner?->getKey(),
             'key' => $key,
             'interval' => $interval?->value,
             'period_start' => $periodStartDate,
@@ -543,12 +576,9 @@ class ModelCounter extends Model
      *
      * @return array<string, int>
      */
-    public static function allForOwner(Model $owner): array
+    public static function allForOwner(?Model $owner): array
     {
-        return static::where([
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
-        ])
+        return static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
             ->whereNull('interval')
             ->whereNull('period_start')
             ->pluck('count', 'key')
@@ -561,7 +591,7 @@ class ModelCounter extends Model
      * @return array<string, int> Period key => count
      */
     public static function history(
-        Model $owner,
+        ?Model $owner,
         string $key,
         Interval $interval,
         int $periods = 12,
@@ -570,12 +600,9 @@ class ModelCounter extends Model
         $periodStarts = $interval->previousPeriods($periods, $fromDate);
         $dateStrings = array_map(fn ($p) => $p->format('Y-m-d'), $periodStarts);
 
-        $results = static::where([
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
-            'key' => $key,
-            'interval' => $interval->value,
-        ])
+        $results = static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
+            ->where('key', $key)
+            ->where('interval', $interval->value)
             ->whereIn('period_start', $dateStrings)
             ->pluck('count', 'period_start')
             ->toArray();
@@ -594,18 +621,15 @@ class ModelCounter extends Model
      * Get sum of counts across all (or a date-bounded range of) periods for an interval-based counter.
      */
     public static function sumForInterval(
-        Model $owner,
+        ?Model $owner,
         string $key,
         Interval $interval,
         ?Carbon $from = null,
         ?Carbon $to = null
     ): int {
-        $query = static::where([
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
-            'key' => $key,
-            'interval' => $interval->value,
-        ]);
+        $query = static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
+            ->where('key', $key)
+            ->where('interval', $interval->value);
 
         if ($from !== null) {
             $query->where('period_start', '>=', $from->toDateString());
@@ -619,18 +643,31 @@ class ModelCounter extends Model
     }
 
     /**
+     * Get the most recent snapshot value for an interval-based counter
+     * (the row with the latest period_start). Returns 0 when none exists.
+     */
+    public static function latestFor(
+        ?Model $owner,
+        string $key,
+        Interval $interval
+    ): int {
+        return (int) (static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
+            ->where('key', $key)
+            ->where('interval', $interval->value)
+            ->orderByDesc('period_start')
+            ->value('count') ?? 0);
+    }
+
+    /**
      * Delete all counter records for an owner and key.
      */
     public static function deleteFor(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null
     ): int {
-        $query = static::where([
-            'owner_type' => $owner->getMorphClass(),
-            'owner_id' => $owner->getKey(),
-            'key' => $key,
-        ]);
+        $query = static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
+            ->where('key', $key);
 
         if ($interval !== null) {
             $query->where('interval', $interval->value);

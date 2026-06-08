@@ -16,6 +16,14 @@ use Rejoose\ModelCounter\Models\ModelCounter;
 class Counter
 {
     /**
+     * Wire-level owner segment used for global (ownerless) counters. Redis
+     * keys can't encode a NULL owner without breaking counter:sync's
+     * colon-split, so global counters travel as `global:0` on the wire and
+     * are stored with NULL owner_type / owner_id in the database.
+     */
+    public const GLOBAL_OWNER_TOKEN = 'global';
+
+    /**
      * Validate a counter key.
      *
      * @throws \InvalidArgumentException
@@ -42,7 +50,7 @@ class Counter
      * Otherwise, uses Redis atomic increment for high performance.
      */
     public static function increment(
-        Model $owner,
+        ?Model $owner,
         string $key,
         int $amount = 1,
         ?Interval $interval = null
@@ -68,7 +76,7 @@ class Counter
      * Otherwise, uses Redis atomic decrement for high performance.
      */
     public static function decrement(
-        Model $owner,
+        ?Model $owner,
         string $key,
         int $amount = 1,
         ?Interval $interval = null
@@ -94,7 +102,7 @@ class Counter
      * Otherwise, returns database baseline plus cached increments.
      */
     public static function get(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
@@ -127,7 +135,7 @@ class Counter
      *
      * @return array<string, int>
      */
-    public static function getMany(Model $owner, array $keys, ?Interval $interval = null): array
+    public static function getMany(?Model $owner, array $keys, ?Interval $interval = null): array
     {
         foreach ($keys as $key) {
             static::validateKey($key);
@@ -191,7 +199,7 @@ class Counter
      *
      * @param  array<string, int>  $counters  Counter key => amount pairs
      */
-    public static function incrementMany(Model $owner, array $counters, ?Interval $interval = null): void
+    public static function incrementMany(?Model $owner, array $counters, ?Interval $interval = null): void
     {
         foreach (array_keys($counters) as $key) {
             static::validateKey($key);
@@ -216,7 +224,7 @@ class Counter
      *
      * @param  array<string, int>  $counters  Counter key => amount pairs
      */
-    public static function decrementMany(Model $owner, array $counters, ?Interval $interval = null): void
+    public static function decrementMany(?Model $owner, array $counters, ?Interval $interval = null): void
     {
         foreach (array_keys($counters) as $key) {
             static::validateKey($key);
@@ -242,7 +250,7 @@ class Counter
      * @return array<string, int> Period key => count
      */
     public static function history(
-        Model $owner,
+        ?Model $owner,
         string $key,
         Interval $interval,
         int $periods = 12,
@@ -272,7 +280,7 @@ class Counter
      * Get sum across all (or a date-bounded range of) periods for an interval-based counter.
      */
     public static function sum(
-        Model $owner,
+        ?Model $owner,
         string $key,
         Interval $interval,
         ?Carbon $from = null,
@@ -306,7 +314,7 @@ class Counter
      * Reset a counter to zero (both cache and database).
      */
     public static function reset(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
@@ -328,7 +336,7 @@ class Counter
      * Set a counter to a specific value.
      */
     public static function set(
-        Model $owner,
+        ?Model $owner,
         string $key,
         int $value,
         ?Interval $interval = null,
@@ -356,8 +364,8 @@ class Counter
      * wrong value, so the cache is cleared unconditionally.
      *
      * Each input row:
-     *   - owner_type:   string (the morph class as stored — e.g. "App\\Models\\User" or a morph-map alias)
-     *   - owner_id:     int|string
+     *   - owner_type:   ?string (the morph class as stored — e.g. "App\\Models\\User" or a morph-map alias; null for a global counter)
+     *   - owner_id:     int|string|null  (null for a global counter)
      *   - key:          string
      *   - interval:     Interval|string|null (enum, value, or null for global)
      *   - period_start: Carbon|string|null   (Carbon, Y-m-d string, or null for global)
@@ -366,7 +374,7 @@ class Counter
      * If the same logical (owner, key, interval, period) appears more than once
      * in the input, the last occurrence wins — matching natural SET semantics.
      *
-     * @param  array<int, array{owner_type: string, owner_id: int|string, key: string, count: int, interval?: Interval|string|null, period_start?: Carbon|string|null}>  $rows
+     * @param  array<int, array{owner_type: ?string, owner_id: int|string|null, key: string, count: int, interval?: Interval|string|null, period_start?: Carbon|string|null}>  $rows
      * @return int Number of rows written to the database after filtering.
      */
     public static function bulkSet(array $rows, bool $skipZero = false): int
@@ -381,6 +389,19 @@ class Counter
         foreach ($rows as $row) {
             $key = $row['key'];
             static::validateKey($key);
+
+            // Enforce the owner invariant: both set (owned) or both null
+            // (global). A null owner_type with a non-null owner_id (or vice
+            // versa) would diverge the Redis wire key (built from owner_type)
+            // from the DB unique_hash (which folds in owner_id), orphaning the
+            // row so it can never be read back.
+            $ownerType = $row['owner_type'] ?? null;
+            $ownerId = $row['owner_id'] ?? null;
+            if (($ownerType === null) !== ($ownerId === null)) {
+                throw new \InvalidArgumentException(
+                    'bulkSet rows require owner_type and owner_id to both be set (owned) or both be null (global).'
+                );
+            }
 
             $intervalRaw = $row['interval'] ?? null;
             $interval = $intervalRaw instanceof Interval
@@ -402,8 +423,8 @@ class Counter
             // while leaving a stale Redis delta would let get() return the
             // wrong value on the next read.
             $store->forget(self::redisKeyRaw(
-                $row['owner_type'],
-                $row['owner_id'],
+                $ownerType,
+                $ownerId,
                 $key,
                 $interval,
                 $periodStart,
@@ -415,8 +436,8 @@ class Counter
             }
 
             $prepared[] = [
-                'owner_type' => $row['owner_type'],
-                'owner_id' => $row['owner_id'],
+                'owner_type' => $ownerType,
+                'owner_id' => $ownerId,
                 'key' => $key,
                 'interval' => $interval?->value,
                 'period_start' => $periodStartDate,
@@ -435,17 +456,22 @@ class Counter
      * row.
      */
     private static function redisKeyRaw(
-        string $ownerType,
-        int|string $ownerId,
+        ?string $ownerType,
+        int|string|null $ownerId,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): string {
-        $morphClass = strtolower(str_replace('\\', '.', $ownerType));
+        // Mirror redisKey()'s null-owner handling so bulk cache invalidation
+        // targets the same `global:0` key the increment path wrote.
+        $morphClass = $ownerType === null
+            ? self::GLOBAL_OWNER_TOKEN
+            : strtolower(str_replace('\\', '.', $ownerType));
+        $ownerKey = $ownerType === null ? '0' : $ownerId;
 
         $baseKey = config('counter.prefix')
             .$morphClass.':'
-            .$ownerId.':'
+            .$ownerKey.':'
             .$key;
 
         if ($interval !== null) {
@@ -466,7 +492,7 @@ class Counter
      * @param  Closure(): int  $countCallback  A callback that returns the count value
      */
     public static function recount(
-        Model $owner,
+        ?Model $owner,
         string $key,
         Closure $countCallback,
         ?Interval $interval = null,
@@ -497,7 +523,7 @@ class Counter
      * @return array<string, int> Period key => count
      */
     public static function recountPeriods(
-        Model $owner,
+        ?Model $owner,
         string $key,
         Interval $interval,
         Closure $countCallback,
@@ -533,16 +559,23 @@ class Counter
      * Generate the Redis key for a counter.
      */
     public static function redisKey(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null,
         ?Carbon $periodStart = null
     ): string {
-        $morphClass = strtolower(str_replace('\\', '.', $owner->getMorphClass()));
+        // A null owner is a global (ownerless) counter. We still need a
+        // parseable, non-empty owner segment on the wire so counter:sync's
+        // colon-split survives; reserve the `global:0` token and translate it
+        // back to a NULL owner at sync time.
+        $morphClass = $owner === null
+            ? self::GLOBAL_OWNER_TOKEN
+            : strtolower(str_replace('\\', '.', $owner->getMorphClass()));
+        $ownerKey = $owner === null ? '0' : $owner->getKey();
 
         $baseKey = config('counter.prefix')
             .$morphClass.':'
-            .$owner->getKey().':'
+            .$ownerKey.':'
             .$key;
 
         if ($interval !== null) {
@@ -559,7 +592,7 @@ class Counter
      *
      * @return array<string, int>
      */
-    public static function all(Model $owner): array
+    public static function all(?Model $owner): array
     {
         return ModelCounter::allForOwner($owner);
     }
@@ -568,7 +601,7 @@ class Counter
      * Delete all records for a counter (both cache and database).
      */
     public static function delete(
-        Model $owner,
+        ?Model $owner,
         string $key,
         ?Interval $interval = null
     ): int {
@@ -586,5 +619,122 @@ class Counter
 
         // Delete from database
         return ModelCounter::deleteFor($owner, $key, $interval);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Global (ownerless) counters
+    |--------------------------------------------------------------------------
+    |
+    | App-wide counters that belong to no model. Stored with NULL owner in the
+    | database and the reserved `global:0` token on the Redis wire. These are
+    | thin wrappers over the owner-keyed methods with a null owner.
+    */
+
+    public static function incrementGlobal(string $key, int $amount = 1, ?Interval $interval = null): void
+    {
+        static::increment(null, $key, $amount, $interval);
+    }
+
+    public static function decrementGlobal(string $key, int $amount = 1, ?Interval $interval = null): void
+    {
+        static::decrement(null, $key, $amount, $interval);
+    }
+
+    public static function getGlobal(string $key, ?Interval $interval = null, ?Carbon $periodStart = null): int
+    {
+        return static::get(null, $key, $interval, $periodStart);
+    }
+
+    /**
+     * @param  array<int, string>  $keys
+     * @return array<string, int>
+     */
+    public static function getManyGlobal(array $keys, ?Interval $interval = null): array
+    {
+        return static::getMany(null, $keys, $interval);
+    }
+
+    public static function setGlobal(string $key, int $value, ?Interval $interval = null, ?Carbon $periodStart = null): void
+    {
+        static::set(null, $key, $value, $interval, $periodStart);
+    }
+
+    public static function resetGlobal(string $key, ?Interval $interval = null, ?Carbon $periodStart = null): void
+    {
+        static::reset(null, $key, $interval, $periodStart);
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    public static function historyGlobal(string $key, Interval $interval, int $periods = 12, ?Carbon $fromDate = null): array
+    {
+        return static::history(null, $key, $interval, $periods, $fromDate);
+    }
+
+    public static function sumGlobal(string $key, Interval $interval, ?Carbon $from = null, ?Carbon $to = null): int
+    {
+        return static::sum(null, $key, $interval, $from, $to);
+    }
+
+    public static function deleteGlobal(string $key, ?Interval $interval = null): int
+    {
+        return static::delete(null, $key, $interval);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Gauge / snapshot API
+    |--------------------------------------------------------------------------
+    |
+    | A gauge stores an *absolute* value for a period (not an additive delta).
+    | snapshot() is the single entry point a daily snapshot job uses to record
+    | a cumulative total ("products with MS today") per interval; history()
+    | then reads the trend back. It is an intent-revealing alias over set()
+    | with an explicit period.
+    */
+
+    /**
+     * Record an absolute snapshot value for an owner at a specific period.
+     */
+    public static function snapshot(
+        ?Model $owner,
+        string $key,
+        int $value,
+        Interval $interval,
+        Carbon|string $periodStart
+    ): void {
+        $period = $periodStart instanceof Carbon ? $periodStart : Carbon::parse($periodStart);
+
+        static::set($owner, $key, $value, $interval, $period);
+    }
+
+    /**
+     * Record an absolute global (ownerless) snapshot value for a period.
+     */
+    public static function snapshotGlobal(
+        string $key,
+        int $value,
+        Interval $interval,
+        Carbon|string $periodStart
+    ): void {
+        static::snapshot(null, $key, $value, $interval, $periodStart);
+    }
+
+    /**
+     * The most recent snapshot value for an interval-based gauge (the row with
+     * the latest period_start). Returns 0 when none exists.
+     */
+    public static function latest(?Model $owner, string $key, Interval $interval): int
+    {
+        static::validateKey($key);
+
+        return ModelCounter::latestFor($owner, $key, $interval);
+    }
+
+    public static function latestGlobal(string $key, Interval $interval): int
+    {
+        return static::latest(null, $key, $interval);
     }
 }
