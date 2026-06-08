@@ -8,7 +8,7 @@ use Rejoose\ModelCounter\Enums\Interval;
 class CounterDecremented
 {
     public function __construct(
-        public readonly Model $owner,
+        public readonly ?Model $owner,
         public readonly string $key,
         public readonly int $amount,
         public readonly ?Interval $interval = null,

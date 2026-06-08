@@ -6,6 +6,7 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\ServiceProvider;
 use Rejoose\ModelCounter\Console\PruneCounters;
+use Rejoose\ModelCounter\Console\RecountCounters;
 use Rejoose\ModelCounter\Console\SyncCounters;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Traits\HasCounters;
@@ -52,6 +53,7 @@ class ModelCounterServiceProvider extends ServiceProvider
             $this->commands([
                 SyncCounters::class,
                 PruneCounters::class,
+                RecountCounters::class,
             ]);
         }
 

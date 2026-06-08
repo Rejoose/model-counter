@@ -4,6 +4,7 @@ namespace Rejoose\ModelCounter\Tests\Feature;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Redis;
@@ -93,6 +94,67 @@ class SyncCountersTest extends TestCase
             0,
             (int) Cache::store('redis')->get(Counter::redisKey($this->user, 'downloads'), 0)
         );
+    }
+
+    public function test_sync_moves_global_cached_increments_to_database_with_null_owner(): void
+    {
+        Counter::incrementGlobal('products', 4, Interval::Day);
+        Counter::incrementGlobal('products', 6, Interval::Day);
+
+        // Reads sum DB (0) + Redis (10) before sync.
+        $today = Carbon::today();
+        $this->assertEquals(10, Counter::getGlobal('products', Interval::Day));
+        $this->assertEquals(0, ModelCounter::valueFor(null, 'products', Interval::Day, $today));
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+
+        // Flushed to a NULL-owner row.
+        $row = ModelCounter::query()->where('key', 'products')->where('interval', 'day')->first();
+        $this->assertNotNull($row);
+        $this->assertNull($row->owner_type);
+        $this->assertNull($row->owner_id);
+        $this->assertEquals(10, $row->count);
+
+        // Redis side drained; subsequent read comes purely from the DB.
+        $this->assertEquals(10, Counter::getGlobal('products', Interval::Day));
+        $this->assertSame(
+            0,
+            (int) Cache::store('redis')->get(Counter::redisKey(null, 'products', Interval::Day), 0)
+        );
+    }
+
+    public function test_sync_does_not_treat_a_global_aliased_owned_counter_as_ownerless(): void
+    {
+        // An app could legitimately register a morph alias literally named
+        // "global" for a real model. Its keys are global:<real-id>:... and must
+        // stay owned — only the reserved global:0 is the ownerless counter.
+        Relation::morphMap(['global' => SyncTestUser::class]);
+
+        try {
+            $this->assertSame(1, (int) $this->user->getKey()); // non-zero id
+
+            Counter::increment($this->user, 'downloads', 5); // → global:1:downloads
+            Counter::incrementGlobal('downloads', 9);        // → global:0:downloads
+
+            $key = Counter::redisKey($this->user, 'downloads');
+            $this->assertStringContainsString(':global:1:', $key);
+
+            $exit = Artisan::call('counter:sync');
+            $this->assertSame(0, $exit, Artisan::output());
+
+            // Owned row preserved with its real owner.
+            $owned = ModelCounter::query()->where('owner_type', 'global')->where('owner_id', 1)->where('key', 'downloads')->first();
+            $this->assertNotNull($owned);
+            $this->assertEquals(5, $owned->count);
+
+            // Separate ownerless row for the true global counter.
+            $global = ModelCounter::query()->whereNull('owner_type')->whereNull('owner_id')->where('key', 'downloads')->first();
+            $this->assertNotNull($global);
+            $this->assertEquals(9, $global->count);
+        } finally {
+            Relation::morphMap([], false);
+        }
     }
 
     public function test_sync_preserves_increments_that_arrive_mid_flight(): void
