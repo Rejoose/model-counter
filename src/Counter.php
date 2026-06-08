@@ -390,6 +390,19 @@ class Counter
             $key = $row['key'];
             static::validateKey($key);
 
+            // Enforce the owner invariant: both set (owned) or both null
+            // (global). A null owner_type with a non-null owner_id (or vice
+            // versa) would diverge the Redis wire key (built from owner_type)
+            // from the DB unique_hash (which folds in owner_id), orphaning the
+            // row so it can never be read back.
+            $ownerType = $row['owner_type'] ?? null;
+            $ownerId = $row['owner_id'] ?? null;
+            if (($ownerType === null) !== ($ownerId === null)) {
+                throw new \InvalidArgumentException(
+                    'bulkSet rows require owner_type and owner_id to both be set (owned) or both be null (global).'
+                );
+            }
+
             $intervalRaw = $row['interval'] ?? null;
             $interval = $intervalRaw instanceof Interval
                 ? $intervalRaw
@@ -410,8 +423,8 @@ class Counter
             // while leaving a stale Redis delta would let get() return the
             // wrong value on the next read.
             $store->forget(self::redisKeyRaw(
-                $row['owner_type'],
-                $row['owner_id'],
+                $ownerType,
+                $ownerId,
                 $key,
                 $interval,
                 $periodStart,
@@ -423,8 +436,8 @@ class Counter
             }
 
             $prepared[] = [
-                'owner_type' => $row['owner_type'],
-                'owner_id' => $row['owner_id'],
+                'owner_type' => $ownerType,
+                'owner_id' => $ownerId,
                 'key' => $key,
                 'interval' => $interval?->value,
                 'period_start' => $periodStartDate,

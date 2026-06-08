@@ -50,8 +50,21 @@ class RecountCounters extends Command
             return self::FAILURE;
         }
 
-        $from = $this->option('from') ? Carbon::parse((string) $this->option('from')) : null;
-        $to = $this->option('to') ? Carbon::parse((string) $this->option('to')) : null;
+        try {
+            $from = $this->option('from') ? Carbon::parse((string) $this->option('from')) : null;
+            $to = $this->option('to') ? Carbon::parse((string) $this->option('to')) : null;
+        } catch (\Throwable $e) {
+            $this->error('Invalid --from/--to date: '.$e->getMessage());
+
+            return self::FAILURE;
+        }
+
+        if ($from !== null && $to !== null && $from->greaterThan($to)) {
+            $this->error('--from must not be later than --to.');
+
+            return self::FAILURE;
+        }
+
         $ids = (array) $this->option('id');
         $chunk = max(1, (int) $this->option('chunk'));
 

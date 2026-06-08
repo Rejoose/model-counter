@@ -107,6 +107,26 @@ class RecountCountersTest extends TestCase
         $this->assertSame(1, $exit);
         $this->assertStringContainsString('must implement DefinesCounters', Artisan::output());
     }
+
+    public function test_invalid_from_date_fails_gracefully(): void
+    {
+        $exit = Artisan::call('counter:recount', ['model' => RecountSubject::class, '--from' => 'not-a-date']);
+
+        $this->assertSame(1, $exit);
+        $this->assertStringContainsString('Invalid --from/--to date', Artisan::output());
+    }
+
+    public function test_from_later_than_to_fails(): void
+    {
+        $exit = Artisan::call('counter:recount', [
+            'model' => RecountSubject::class,
+            '--from' => '2026-06-08',
+            '--to' => '2026-06-01',
+        ]);
+
+        $this->assertSame(1, $exit);
+        $this->assertStringContainsString('--from must not be later than --to', Artisan::output());
+    }
 }
 
 class RecountSubject extends Model implements DefinesCounters

@@ -341,7 +341,10 @@ class SyncCounters extends Command
                     ? " [{$parsed['interval']->value}:{$parsed['period_key_str']}]"
                     : '';
                 $ownerLabel = $row['db_owner_type'] ?? Counter::GLOBAL_OWNER_TOKEN;
-                $this->line("  ✓ {$ownerLabel}#{$row['db_owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
+                // Global rows have a NULL db owner id; show the reserved 0 so
+                // the log mirrors the `global:0` wire token.
+                $ownerIdLabel = $row['db_owner_id'] ?? '0';
+                $this->line("  ✓ {$ownerLabel}#{$ownerIdLabel} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
             }
         }
 

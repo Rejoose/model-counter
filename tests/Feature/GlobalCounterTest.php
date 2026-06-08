@@ -99,6 +99,26 @@ class GlobalCounterTest extends TestCase
         $this->assertEquals(600, Counter::getGlobal('tier_ms', Interval::Month, Carbon::parse('2026-02-01')));
     }
 
+    public function test_bulk_set_rejects_a_mixed_owner_invariant(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        // owner_type null but owner_id set — would orphan the row (wire key
+        // built from owner_type, DB hash folds in owner_id).
+        Counter::bulkSet([
+            ['owner_type' => null, 'owner_id' => 5, 'key' => 'tier_ms', 'count' => 1],
+        ]);
+    }
+
+    public function test_bulk_set_rejects_owner_type_without_owner_id(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        Counter::bulkSet([
+            ['owner_type' => 'app', 'owner_id' => null, 'key' => 'tier_ms', 'count' => 1],
+        ]);
+    }
+
     public function test_snapshot_writes_an_absolute_value_per_period_and_is_idempotent(): void
     {
         Counter::snapshotGlobal('tier_ms', 1000, Interval::Day, '2026-06-08');
