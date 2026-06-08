@@ -8,6 +8,7 @@ use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Cache;
+use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Events\CounterSynced;
 use Rejoose\ModelCounter\Models\ModelCounter;
@@ -221,6 +222,27 @@ class SyncCounters extends Command
                 continue;
             }
 
+            // Global (ownerless) counters travel as the reserved `global:0`
+            // token and are stored with NULL owner_type / owner_id. There is
+            // no model to resolve — translate straight to a null owner. The
+            // owner_id MUST be the reserved 0: an app could legitimately use a
+            // morph-map alias literally named "global" for a real model, whose
+            // rows carry a real (non-zero) id and must NOT be treated as
+            // ownerless. Auto-increment ids start at 1, so 0 can't collide.
+            if ($parsed['owner_type'] === Counter::GLOBAL_OWNER_TOKEN
+                && (string) $parsed['owner_id'] === '0') {
+                $parsedRows[] = [
+                    'wire_key' => $wireKey,
+                    'raw_key' => $rawKey,
+                    'parsed' => $parsed,
+                    'db_owner_type' => null,
+                    'db_owner_id' => null,
+                ];
+                $rawKeysToRead[] = $rawKey;
+
+                continue;
+            }
+
             // Counter::redisKey() encodes the owner type two different
             // ways: morph-map aliases are preserved verbatim, plain
             // FQCNs are lower-cased with backslashes replaced by dots.
@@ -245,6 +267,7 @@ class SyncCounters extends Command
                 'raw_key' => $rawKey,
                 'parsed' => $parsed,
                 'db_owner_type' => $dbOwnerType,
+                'db_owner_id' => $parsed['owner_id'],
             ];
             $rawKeysToRead[] = $rawKey;
         }
@@ -305,7 +328,7 @@ class SyncCounters extends Command
             $parsed = $row['parsed'];
             $deltas[] = [
                 'owner_type' => $row['db_owner_type'],
-                'owner_id' => $parsed['owner_id'],
+                'owner_id' => $row['db_owner_id'],
                 'key' => $parsed['counter_key'],
                 'amount' => $value,
                 'interval' => $parsed['interval']?->value,
@@ -317,7 +340,8 @@ class SyncCounters extends Command
                 $intervalInfo = $parsed['interval']
                     ? " [{$parsed['interval']->value}:{$parsed['period_key_str']}]"
                     : '';
-                $this->line("  ✓ {$row['db_owner_type']}#{$parsed['owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
+                $ownerLabel = $row['db_owner_type'] ?? Counter::GLOBAL_OWNER_TOKEN;
+                $this->line("  ✓ {$ownerLabel}#{$row['db_owner_id']} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
             }
         }
 
