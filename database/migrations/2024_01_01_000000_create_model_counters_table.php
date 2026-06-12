@@ -17,7 +17,10 @@ return new class extends Migration
             $table->string('key', 100);
             $table->string('interval', 20)->nullable();
             $table->date('period_start')->nullable();
-            $table->unsignedBigInteger('count')->default(0);
+            // Signed: decrements can legitimately drive a counter negative
+            // (e.g. a Day bucket that only saw deletions of items created on
+            // earlier days).
+            $table->bigInteger('count')->default(0);
             $table->timestamps();
 
             // Unique constraint to prevent duplicate counters

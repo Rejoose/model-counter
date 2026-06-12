@@ -75,8 +75,9 @@ class ModelCounterResource extends Resource
                     ->label('Count')
                     ->numeric()
                     ->required()
-                    ->default(0)
-                    ->minValue(0),
+                    // No minValue: counts are signed — decrements can
+                    // legitimately drive a counter negative.
+                    ->default(0),
             ]);
     }
 

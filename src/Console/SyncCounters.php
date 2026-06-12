@@ -7,6 +7,7 @@ use Illuminate\Console\Command;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Support\Facades\Cache;
 use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
@@ -114,10 +115,12 @@ class SyncCounters extends Command
 
         $searchPattern = $wirePrefix.($pattern ? $pattern.'*' : '*');
 
-        // phpredis (>=6.x) treats an initial cursor of 0 or "0" as "already
-        // finished" and returns false without scanning. Passing null is the
-        // only portable way to start an iteration.
-        $cursor = null;
+        // The initial SCAN cursor is client-specific: phpredis (>=6.x) treats
+        // 0 or "0" as "already finished" and returns false without scanning,
+        // so it must start from null — while Predis serializes null to an
+        // empty string on the wire, which Redis rejects with "ERR invalid
+        // cursor", so it must start from "0".
+        $cursor = $redis instanceof PhpRedisConnection ? null : '0';
         $totalFound = 0;
         $synced = 0;
         $skipped = 0;

@@ -22,14 +22,8 @@ class SyncCountersTest extends TestCase
     {
         parent::setUp();
 
-        if (! extension_loaded('redis')) {
-            $this->markTestSkipped('phpredis extension not installed.');
-        }
-
-        try {
-            Redis::connection('default')->ping();
-        } catch (\Throwable $e) {
-            $this->markTestSkipped('Redis not reachable: '.$e->getMessage());
+        if (($reason = $this->redisUnavailableReason()) !== null) {
+            $this->markTestSkipped($reason);
         }
 
         if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('sync_test_users')) {
@@ -48,7 +42,7 @@ class SyncCountersTest extends TestCase
 
     protected function tearDown(): void
     {
-        if (extension_loaded('redis')) {
+        if ($this->redisUnavailableReason() === null) {
             try {
                 Redis::connection('default')->flushdb();
             } catch (\Throwable) {
@@ -57,6 +51,25 @@ class SyncCountersTest extends TestCase
         }
 
         parent::tearDown();
+    }
+
+    /**
+     * Why this suite can't run, or null when Redis is usable. Subclasses
+     * targeting another client (e.g. Predis) override the client probe.
+     */
+    protected function redisUnavailableReason(): ?string
+    {
+        if (! extension_loaded('redis')) {
+            return 'phpredis extension not installed.';
+        }
+
+        try {
+            Redis::connection('default')->ping();
+        } catch (\Throwable $e) {
+            return 'Redis not reachable: '.$e->getMessage();
+        }
+
+        return null;
     }
 
     protected function getEnvironmentSetUp($app): void
@@ -195,6 +208,40 @@ class SyncCountersTest extends TestCase
         Artisan::call('counter:sync');
 
         $this->assertEquals(4, ModelCounter::valueFor($this->user, 'page_views', Interval::Day));
+    }
+
+    public function test_sync_flushes_net_negative_deltas(): void
+    {
+        // Net-negative pending deltas are legitimate: a Day bucket that only
+        // saw deletions of items created on earlier days. Regression: with an
+        // UNSIGNED count column on MySQL the sync failed on every such key
+        // (insert of a negative row, then `count = count + (negative)`
+        // arithmetic), exited 1, and never drained the key from Redis.
+
+        // New row inserted directly with a negative count.
+        Counter::decrement($this->user, 'tags', 7, Interval::Day);
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+        $this->assertSame(-7, ModelCounter::valueFor($this->user, 'tags', Interval::Day));
+
+        // Existing positive row pushed below zero by the upsert arithmetic.
+        Counter::incrementGlobal('tags', 5, Interval::Day);
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+        $this->assertSame(5, Counter::getGlobal('tags', Interval::Day));
+
+        Counter::decrementGlobal('tags', 12, Interval::Day);
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+        $this->assertSame(-7, Counter::getGlobal('tags', Interval::Day));
+
+        // Redis fully drained — nothing left to double-apply.
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+        $this->assertSame(-7, Counter::getGlobal('tags', Interval::Day));
     }
 
     public function test_sync_is_noop_on_array_store(): void

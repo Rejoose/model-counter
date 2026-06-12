@@ -2,6 +2,13 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.4.1] - 2026-06-12
+
+### Fixed
+- **`count` column is now signed** (`make_count_signed_on_model_counters_table` migration + signed type in the create migration for fresh installs). Decrements can legitimately drive a counter negative — e.g. a Day bucket that only saw deletions of items created on earlier days. On MySQL the previous UNSIGNED column made `counter:sync` fail on every net-negative delta (error 1264 on insert, 1690 on the `count = count + (negative)` upsert arithmetic); the failed keys were never drained from Redis, so every subsequent scheduled run exited 1 as well.
+- The Filament `ModelCounterResource` form no longer enforces `minValue(0)` on `count` — admins can view/edit legitimately negative counters.
+- **`counter:sync` now works with the Predis client.** The SCAN loop started from a `null` cursor (a phpredis ≥6 requirement), which Predis serializes to an empty string — Redis rejects it with `ERR invalid cursor`, so the command exited 1 on every run under `REDIS_CLIENT=predis`. The initial cursor is now client-aware. The whole sync suite re-runs under Predis via `SyncCountersPredisTest` (`predis/predis` added to require-dev only).
+
 ## [2.4.0] - 2026-06-08
 
 ### Added

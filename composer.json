@@ -1,6 +1,6 @@
 {
     "name": "rejoose/model-counter",
-    "version": "2.4.0",
+    "version": "2.4.1",
     "description": "Ultra-efficient model counter package for Laravel with Redis-backed caching and scheduled DB syncing",
     "type": "library",
     "license": "MIT",
@@ -28,7 +28,8 @@
         "laravel/pint": "^1.13",
         "orchestra/testbench": "^11.0",
         "pestphp/pest": "^3.0",
-        "phpstan/phpstan": "^2.0"
+        "phpstan/phpstan": "^2.0",
+        "predis/predis": "^3.0"
     },
     "suggest": {
         "filament/filament": "Required for the Filament admin panel resource (^4.0)"
