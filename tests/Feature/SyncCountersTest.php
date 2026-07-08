@@ -8,6 +8,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Redis;
+use Rejoose\ModelCounter\Console\SyncCounters;
 use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Models\ModelCounter;
@@ -16,6 +17,17 @@ use Rejoose\ModelCounter\Traits\HasCounters;
 
 class SyncCountersTest extends TestCase
 {
+    /**
+     * The command's atomic drain-and-reclaim script, reused verbatim so a test
+     * can drive the exact concurrency ordering the command can't be interrupted
+     * at.
+     *
+     * NOTE: these Redis-backed tests still simulate concurrency in a single
+     * process — a true multi-process race between increment and sync is not
+     * covered here.
+     */
+    private const RECLAIM_SCRIPT = SyncCounters::RECLAIM_SCRIPT;
+
     protected SyncTestUser $user;
 
     protected function setUp(): void
@@ -26,14 +38,6 @@ class SyncCountersTest extends TestCase
             $this->markTestSkipped($reason);
         }
 
-        if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('sync_test_users')) {
-            $this->app['db']->connection()->getSchemaBuilder()->create('sync_test_users', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->timestamps();
-            });
-        }
-
         $this->useRedisCache();
         Redis::connection('default')->flushdb();
 
@@ -42,6 +46,13 @@ class SyncCountersTest extends TestCase
 
     protected function tearDown(): void
     {
+        // Clear counters before parent::tearDown(). Testbench re-runs the
+        // package migrations' down() at teardown, and make_count_signed's
+        // down() reverts `count` to UNSIGNED — which throws on MySQL if any
+        // net-negative row from these sync tests is still present. (Other test
+        // classes already clear ModelCounter here for the same isolation reason.)
+        ModelCounter::query()->delete();
+
         if ($this->redisUnavailableReason() === null) {
             try {
                 Redis::connection('default')->flushdb();
@@ -145,19 +156,24 @@ class SyncCountersTest extends TestCase
         Relation::morphMap(['global' => SyncTestUser::class]);
 
         try {
-            $this->assertSame(1, (int) $this->user->getKey()); // non-zero id
+            // A real, non-zero owner id (the exact value is DB-assigned and,
+            // on MySQL, isn't reset by transaction rollback between tests, so
+            // don't assume 1 — just that it's non-zero and thus never the
+            // reserved global:0 token).
+            $ownerId = (int) $this->user->getKey();
+            $this->assertGreaterThan(0, $ownerId);
 
-            Counter::increment($this->user, 'downloads', 5); // → global:1:downloads
+            Counter::increment($this->user, 'downloads', 5); // → global:<id>:downloads
             Counter::incrementGlobal('downloads', 9);        // → global:0:downloads
 
             $key = Counter::redisKey($this->user, 'downloads');
-            $this->assertStringContainsString(':global:1:', $key);
+            $this->assertStringContainsString(":global:{$ownerId}:", $key);
 
             $exit = Artisan::call('counter:sync');
             $this->assertSame(0, $exit, Artisan::output());
 
             // Owned row preserved with its real owner.
-            $owned = ModelCounter::query()->where('owner_type', 'global')->where('owner_id', 1)->where('key', 'downloads')->first();
+            $owned = ModelCounter::query()->where('owner_type', 'global')->where('owner_id', $ownerId)->where('key', 'downloads')->first();
             $this->assertNotNull($owned);
             $this->assertEquals(5, $owned->count);
 
@@ -175,7 +191,9 @@ class SyncCountersTest extends TestCase
         Counter::increment($this->user, 'views', 10);
 
         // Simulate a concurrent write between our GET and DECRBY by bumping
-        // the counter here: DECRBY should only subtract what we actually read.
+        // the counter here: the reclaim script should only subtract what we
+        // actually read and, because a residual remains, must NOT delete the
+        // key.
         $redisKey = Counter::redisKey($this->user, 'views');
         $fullKey = 'testprefix_cache_'.$redisKey;
 
@@ -187,18 +205,77 @@ class SyncCountersTest extends TestCase
         Redis::connection('default')->incrby($fullKey, 7);
 
         // Now simulate what the command does: upsert the delta we read, then
-        // DECRBY by that amount only.
+        // run the atomic drain-and-reclaim (DECRBY by that amount only, DEL if
+        // it hit exactly zero). Uses Laravel's normalised eval signature
+        // ($script, $numkeys, ...$args), which is identical for phpredis and
+        // Predis.
         ModelCounter::addDeltaRaw(
             $this->user->getMorphClass(),
             $this->user->getKey(),
             'views',
             $value
         );
-        Redis::connection('default')->decrby($fullKey, $value);
+        Redis::connection('default')->eval(self::RECLAIM_SCRIPT, 1, $fullKey, $value);
 
         $this->assertSame(10, ModelCounter::valueFor($this->user, 'views'));
         $this->assertSame(7, (int) Redis::connection('default')->get($fullKey));
+        // Residual delta left the key alive rather than reclaiming it.
+        $this->assertSame(1, (int) Redis::connection('default')->exists($fullKey));
         $this->assertSame(17, Counter::get($this->user, 'views'));
+    }
+
+    public function test_sync_reclaims_keys_that_drain_to_zero(): void
+    {
+        // Without the DEL-if-zero reclaim, a fully-synced key lingers at 0
+        // forever and every subsequent per-minute SCAN grows unbounded.
+        Counter::increment($this->user, 'clicks', 4);
+
+        $fullKey = 'testprefix_cache_'.Counter::redisKey($this->user, 'clicks');
+        $this->assertSame(1, (int) Redis::connection('default')->exists($fullKey));
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+
+        $this->assertSame(4, ModelCounter::valueFor($this->user, 'clicks'));
+        // Fully drained → key removed entirely, not left lingering at 0.
+        $this->assertSame(0, (int) Redis::connection('default')->exists($fullKey));
+    }
+
+    public function test_get_many_reads_batched_redis_deltas(): void
+    {
+        // Regression: getMany() built prefix-less keys and handed them to a raw
+        // MGET, which read the wrong keys and returned all zeros. This exercises
+        // the real Redis batch read (DB baseline + Redis delta) end to end.
+        Counter::increment($this->user, 'a', 3);
+        Counter::increment($this->user, 'b', 5);
+
+        // 'c' has only a DB baseline (no Redis delta); 'd' has nothing at all.
+        ModelCounter::addDeltaRaw($this->user->getMorphClass(), $this->user->getKey(), 'c', 2);
+
+        $result = Counter::getMany($this->user, ['a', 'b', 'c', 'd']);
+
+        $this->assertSame(3, $result['a']);
+        $this->assertSame(5, $result['b']);
+        $this->assertSame(2, $result['c']);
+        $this->assertSame(0, $result['d']);
+    }
+
+    public function test_bulk_writers_pipeline_deltas_to_redis(): void
+    {
+        // Exercises the pipelined Redis path (RedisStore connection) rather
+        // than the per-key fallback used by the array store.
+        Counter::incrementMany($this->user, ['likes' => 4, 'shares' => 9]);
+        Counter::decrementMany($this->user, ['likes' => 1]);
+
+        $this->assertSame(3, Counter::get($this->user, 'likes'));
+        $this->assertSame(9, Counter::get($this->user, 'shares'));
+
+        // The written keys carry the store prefix and survive a full sync.
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+
+        $this->assertSame(3, ModelCounter::valueFor($this->user, 'likes'));
+        $this->assertSame(9, ModelCounter::valueFor($this->user, 'shares'));
     }
 
     public function test_sync_syncs_interval_counters(): void

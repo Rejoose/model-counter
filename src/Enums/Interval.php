@@ -85,12 +85,17 @@ enum Interval: string
         $periods = [];
 
         for ($i = 0; $i < $count; $i++) {
+            // Truncate to the period start *before* subtracting. Subtracting
+            // first from a raw date that carries a day-of-month (e.g. the 31st)
+            // lets Carbon overflow into the wrong month/quarter (subMonths from
+            // May 31 lands in early May, not April), which would then snap back
+            // to the current period and silently skip one.
             $periods[] = match ($this) {
-                self::Day => $date->copy()->subDays($i)->startOfDay(),
-                self::Week => $date->copy()->subWeeks($i)->startOfWeek(),
-                self::Month => $date->copy()->subMonths($i)->startOfMonth(),
-                self::Quarter => $date->copy()->subQuarters($i)->startOfQuarter(),
-                self::Year => $date->copy()->subYears($i)->startOfYear(),
+                self::Day => $date->copy()->startOfDay()->subDays($i),
+                self::Week => $date->copy()->startOfWeek()->subWeeks($i),
+                self::Month => $date->copy()->startOfMonth()->subMonths($i),
+                self::Quarter => $date->copy()->startOfQuarter()->subQuarters($i),
+                self::Year => $date->copy()->startOfYear()->subYears($i),
             };
         }
 

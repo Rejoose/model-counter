@@ -27,25 +27,8 @@ class RecountIntervalTestLogin extends Model
 }
 
 beforeEach(function () {
-    // Create test user table
-    if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('recount_interval_test_users')) {
-        $this->app['db']->connection()->getSchemaBuilder()->create('recount_interval_test_users', function ($table) {
-            $table->id();
-            $table->string('name');
-            $table->timestamps();
-        });
-    }
-
-    // Create test logins table
-    if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('recount_interval_test_logins')) {
-        $this->app['db']->connection()->getSchemaBuilder()->create('recount_interval_test_logins', function ($table) {
-            $table->id();
-            $table->foreignId('user_id');
-            $table->timestamp('created_at');
-            $table->timestamp('updated_at');
-        });
-    }
-
+    // Owner/relation tables are created in TestCase::defineDatabaseMigrations()
+    // (before RefreshDatabase's transaction) so the suite is MySQL-safe.
     $this->user = RecountIntervalTestUser::create(['name' => 'Test User']);
 });
 

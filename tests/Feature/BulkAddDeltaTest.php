@@ -25,14 +25,6 @@ class BulkAddDeltaTest extends TestCase
     {
         parent::setUp();
 
-        if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('bulk_test_users')) {
-            $this->app['db']->connection()->getSchemaBuilder()->create('bulk_test_users', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->timestamps();
-            });
-        }
-
         $this->alice = BulkTestUser::create(['name' => 'Alice']);
         $this->bob = BulkTestUser::create(['name' => 'Bob']);
     }

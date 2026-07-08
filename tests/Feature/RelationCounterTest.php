@@ -26,25 +26,8 @@ class RelationTestPost extends Model
 }
 
 beforeEach(function () {
-    // Create test user table
-    if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('relation_test_users')) {
-        $this->app['db']->connection()->getSchemaBuilder()->create('relation_test_users', function ($table) {
-            $table->id();
-            $table->string('name');
-            $table->timestamps();
-        });
-    }
-
-    // Create test posts table
-    if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('relation_test_posts')) {
-        $this->app['db']->connection()->getSchemaBuilder()->create('relation_test_posts', function ($table) {
-            $table->id();
-            $table->foreignId('user_id');
-            $table->string('title');
-            $table->timestamps();
-        });
-    }
-
+    // Owner/relation tables are created in TestCase::defineDatabaseMigrations()
+    // (before RefreshDatabase's transaction) so the suite is MySQL-safe.
     $this->user = RelationTestUser::create(['name' => 'Test User']);
 });
 

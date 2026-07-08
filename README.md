@@ -738,9 +738,13 @@ In direct mode:
 
 2. **Sync Phase** (Scheduled):
    - The `counter:sync` command runs on your schedule (e.g., every minute)
-   - Reads all cached counters from Redis
+   - Reads all cached counters from Redis with `GET`
    - Batch updates the database using efficient upsert operations
-   - Clears the Redis cache after successful sync
+   - Subtracts exactly what it read with `DECRBY` and reclaims any key that
+     drained to zero — so a failed DB write is retried on the next run and
+     increments that arrive mid-sync are never lost
+   - Until this phase runs, deltas live **only** in Redis: flushing the cache
+     store (`cache:clear` / `FLUSHDB`) beforehand discards them (see Thread Safety)
 
 3. **Read Phase**:
    - Reads the baseline value from the database
@@ -798,8 +802,19 @@ All operations are designed to be thread-safe:
 
 - Redis atomic operations (`INCR`, `DECR`)
 - Database upserts with proper locking
-- `GETDEL` during sync prevents double-counting
+- Sync reads with `GET` and then subtracts exactly what it read with `DECRBY`
+  (not `GETDEL`) — if the DB write fails the delta stays in Redis and the next
+  sync retries, and an increment that races the sync is preserved. A drained
+  key is reclaimed atomically (a single Lua `DECRBY` + `DEL`-if-zero) so the
+  keyspace grows with activity, not history.
 - Race condition handling with insert-or-update retry
+
+> ⚠️ **Never `cache:clear` / `FLUSHDB` the counter store without syncing first.**
+> Unsynced deltas live only in Redis until `counter:sync` writes them to the
+> database. Flushing the cache store (e.g. `php artisan cache:clear`, a manual
+> `FLUSHDB`, or a deploy step that clears cache) silently discards every pending
+> delta. Always run `php artisan counter:sync` immediately before any operation
+> that flushes the counter store.
 
 ## 🐛 Troubleshooting
 

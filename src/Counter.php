@@ -4,7 +4,11 @@ namespace Rejoose\ModelCounter;
 
 use Carbon\Carbon;
 use Closure;
+use Illuminate\Cache\RedisStore;
+use Illuminate\Cache\Repository;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Redis\Connections\PhpRedisConnection;
+use Illuminate\Redis\Connections\PredisConnection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Rejoose\ModelCounter\Enums\Interval;
@@ -155,40 +159,27 @@ class Counter
             return $results;
         }
 
-        // Batch fetch DB values
+        // Read each DB baseline value.
         $results = [];
         foreach ($keys as $key) {
             $results[$key] = ModelCounter::valueFor($owner, $key, $interval);
         }
 
-        // Batch fetch cache values using Redis MGET when available
+        // Batch fetch cache deltas. Repository::many() issues a single MGET on
+        // Redis with the cache-store prefix applied (and degrades cleanly on
+        // non-Redis stores), so we never touch the raw connection or reapply
+        // the prefix ourselves — doing so read the wrong (prefix-less) keys and
+        // silently returned all zeros.
         $store = Cache::store(config('counter.store'));
         $redisKeys = [];
         foreach ($keys as $key) {
             $redisKeys[$key] = static::redisKey($owner, $key, $interval);
         }
 
-        $cacheValues = [];
-        try {
-            if (! method_exists($store, 'connection')) {
-                throw new \RuntimeException('Store does not support connection().');
-            }
-            $connection = $store->connection();
-            $rawValues = $connection->mget(array_values($redisKeys));
-            $i = 0;
-            foreach ($redisKeys as $counterKey => $redisKey) {
-                $cacheValues[$counterKey] = (int) ($rawValues[$i] ?? 0);
-                $i++;
-            }
-        } catch (\Throwable) {
-            // Fallback to individual reads if MGET is not available
-            foreach ($redisKeys as $counterKey => $redisKey) {
-                $cacheValues[$counterKey] = (int) $store->get($redisKey, 0);
-            }
-        }
+        $cacheValues = $store->many(array_values($redisKeys));
 
         foreach ($keys as $key) {
-            $results[$key] += $cacheValues[$key] ?? 0;
+            $results[$key] += (int) ($cacheValues[$redisKeys[$key]] ?? 0);
         }
 
         return $results;
@@ -210,6 +201,10 @@ class Counter
                 ModelCounter::addDelta($owner, $key, $amount, $interval);
             }
 
+            return;
+        }
+
+        if (self::pipelineBulkDelta($owner, $counters, $interval, false)) {
             return;
         }
 
@@ -238,10 +233,64 @@ class Counter
             return;
         }
 
+        if (self::pipelineBulkDelta($owner, $counters, $interval, true)) {
+            return;
+        }
+
         $store = Cache::store(config('counter.store'));
         foreach ($counters as $key => $amount) {
             $store->decrement(static::redisKey($owner, $key, $interval), $amount);
         }
+    }
+
+    /**
+     * Apply a batch of counter deltas to Redis in a single pipelined round
+     * trip. Mirrors RedisStore::increment/decrement exactly — the cache-store
+     * prefix is prepended and the client applies any connection-level prefix on
+     * top, just as the per-key path does. Returns false when the store is not a
+     * Redis connection that supports pipelining (e.g. the array store in
+     * tests), so the caller can fall back to the per-key loop.
+     *
+     * @param  array<string, int>  $counters  Counter key => amount pairs
+     */
+    private static function pipelineBulkDelta(?Model $owner, array $counters, ?Interval $interval, bool $decrement): bool
+    {
+        $store = Cache::store(config('counter.store'));
+
+        if (! $store instanceof Repository) {
+            return false;
+        }
+
+        $inner = $store->getStore();
+
+        // Only the plain (non-cluster) Redis cache store exposes a
+        // pipelineable connection we can drive directly. Any other store (the
+        // array store in tests, a cluster connection, a custom store) falls
+        // back to the per-key loop in the caller.
+        if (! $inner instanceof RedisStore) {
+            return false;
+        }
+
+        $connection = $inner->connection();
+
+        if (! $connection instanceof PhpRedisConnection && ! $connection instanceof PredisConnection) {
+            return false;
+        }
+
+        $prefix = $inner->getPrefix();
+
+        $connection->pipeline(function ($pipe) use ($counters, $owner, $interval, $prefix, $decrement): void {
+            foreach ($counters as $key => $amount) {
+                $fullKey = $prefix.static::redisKey($owner, $key, $interval);
+                if ($decrement) {
+                    $pipe->decrby($fullKey, $amount);
+                } else {
+                    $pipe->incrby($fullKey, $amount);
+                }
+            }
+        });
+
+        return true;
     }
 
     /**

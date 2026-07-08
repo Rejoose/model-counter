@@ -24,6 +24,16 @@ class SyncCounters extends Command
     protected $description = 'Sync cached counter increments from Redis to the database';
 
     /**
+     * Atomic drain-and-reclaim script run per key during sync: subtract the
+     * synced amount and DEL the key iff it hit exactly zero. See
+     * pipelineDecrBy() for why atomicity matters. Exposed as a const so tests
+     * can drive the exact same script instead of hand-copying it.
+     */
+    public const RECLAIM_SCRIPT = "local n = redis.call('DECRBY', KEYS[1], ARGV[1]) "
+        ."if n == 0 then redis.call('DEL', KEYS[1]) end "
+        .'return n';
+
+    /**
      * Memoised resolveModelClass() output, scoped to a single command run.
      * Typical sync batches re-resolve the same handful of owner types
      * thousands of times; class_exists() / ReflectionClass aren't free.
@@ -405,11 +415,11 @@ class SyncCounters extends Command
             $errors += $localErrors;
         }
 
-        // Phase 5: pipeline DECRBYs. Rows are already committed to the DB,
-        // so a DECRBY failure here means "synced but Redis still has the
-        // delta". The next sync will re-read those values and double-count.
-        // We surface that as a warning + error count rather than rolling
-        // back the (already-durable) DB writes.
+        // Phase 5: pipeline the atomic drain-and-reclaim (DECRBY + DEL-if-zero).
+        // Rows are already committed to the DB, so a failure here means "synced
+        // but Redis still has the delta". The next sync will re-read those
+        // values and double-count. We surface that as a warning + error count
+        // rather than rolling back the (already-durable) DB writes.
         if ($decrPlan !== []) {
             try {
                 $this->pipelineDecrBy($redis, array_values($decrPlan));
@@ -456,7 +466,24 @@ class SyncCounters extends Command
     }
 
     /**
-     * Run DECRBY for many keys in a single Redis round trip.
+     * Subtract the synced amount from each key and reclaim any key that drains
+     * to exactly zero, in a single pipelined round trip.
+     *
+     * Each key is handled by an atomic Lua script (DECRBY + conditional DEL)
+     * rather than a bare DECRBY. Atomicity is what preserves the
+     * concurrent-increment guarantee: an INCR that races the sync either lands
+     * *before* the script (its delta is included in the DECRBY result, so the
+     * result is non-zero and the key is kept) or *after* it (the key was
+     * already DELeted and the INCR recreates it). A non-atomic "DECRBY then
+     * GET-and-DEL-if-zero" would lose an increment that arrives between the
+     * check and the DEL. Without the DEL, a fully-drained key would linger at 0
+     * forever and every subsequent per-minute SCAN would grow unbounded.
+     *
+     * The eval argument order differs between clients: phpredis takes
+     * eval($script, $args, $numkeys); Predis takes eval($script, $numkeys,
+     * ...$args). Both clients apply their key prefix to the KEYS array exactly
+     * as they do for DECRBY, so the raw (connection-prefix-stripped) key is
+     * passed unchanged.
      *
      * @param  array<int, array{0: string, 1: int}>  $plan
      */
@@ -466,10 +493,24 @@ class SyncCounters extends Command
             return;
         }
 
+        $script = self::RECLAIM_SCRIPT;
+
+        // Inside a pipeline the callback receives the *raw* client, whose eval
+        // signature is native: phpredis is eval($script, $args, $numkeys);
+        // Predis (and Laravel's own connection wrapper) is eval($script,
+        // $numkeys, ...$args). Outside a pipeline we call through Laravel's
+        // connection wrapper, which normalises both clients to the
+        // ($script, $numkeys, ...$args) form.
+        $isPhpRedis = $redis instanceof PhpRedisConnection;
+
         if (method_exists($redis, 'pipeline')) {
-            $redis->pipeline(function ($pipe) use ($plan): void {
+            $redis->pipeline(function ($pipe) use ($plan, $script, $isPhpRedis): void {
                 foreach ($plan as [$key, $amount]) {
-                    $pipe->decrby($key, $amount);
+                    if ($isPhpRedis) {
+                        $pipe->eval($script, [$key, $amount], 1);
+                    } else {
+                        $pipe->eval($script, 1, $key, $amount);
+                    }
                 }
             });
 
@@ -477,7 +518,7 @@ class SyncCounters extends Command
         }
 
         foreach ($plan as [$key, $amount]) {
-            $redis->decrby($key, $amount);
+            $redis->eval($script, 1, $key, $amount);
         }
     }
 

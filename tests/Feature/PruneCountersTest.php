@@ -17,14 +17,6 @@ class PruneCountersTest extends TestCase
     {
         parent::setUp();
 
-        if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('prune_test_users')) {
-            $this->app['db']->connection()->getSchemaBuilder()->create('prune_test_users', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->timestamps();
-            });
-        }
-
         $this->user = PruneTestUser::create(['name' => 'Test User']);
     }
 
