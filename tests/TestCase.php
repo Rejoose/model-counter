@@ -24,68 +24,13 @@ abstract class TestCase extends Orchestra
 
     protected function defineDatabaseMigrations(): void
     {
+        // Package tables plus the suite's owner/relation tables. Both go through
+        // the migrator so RefreshDatabase's `migrate:fresh` recreates them on
+        // every driver — creating the owner tables imperatively in
+        // setUp()/beforeEach() broke on MySQL (migrate:fresh drops non-migration
+        // tables, and MySQL's auto-committing DDL destroyed transaction isolation).
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
-
-        // Create the tables the test suite's owner models attach to. This runs
-        // in the migration phase, *before* RefreshDatabase opens its per-test
-        // transaction. That ordering matters on MySQL, where DDL auto-commits:
-        // creating these tables inside setUp()/beforeEach() (as the suite used
-        // to) would commit the open transaction and destroy test isolation.
-        // SQLite tolerated it because its DDL is transactional; MySQL does not.
-        $schema = $this->app['db']->connection()->getSchemaBuilder();
-
-        $create = static function (string $name, \Closure $definition) use ($schema): void {
-            if (! $schema->hasTable($name)) {
-                $schema->create($name, $definition);
-            }
-        };
-
-        $simpleOwner = static function ($table): void {
-            $table->id();
-            $table->string('name');
-            $table->timestamps();
-        };
-
-        // Owner tables that are just id + name + timestamps.
-        foreach ([
-            'test_users',
-            'bulk_test_users',
-            'bulk_set_test_users',
-            'defined_counter_users',
-            'global_test_owners',
-            'prune_test_users',
-            'sync_test_users',
-            'recount_interval_test_users',
-            'relation_test_users',
-        ] as $name) {
-            $create($name, $simpleOwner);
-        }
-
-        $create('recount_subjects', function ($table): void {
-            $table->id();
-            $table->string('name');
-            $table->unsignedInteger('things_count')->default(0);
-            $table->timestamps();
-        });
-
-        $create('recount_plain_models', function ($table): void {
-            $table->id();
-            $table->timestamps();
-        });
-
-        $create('recount_interval_test_logins', function ($table): void {
-            $table->id();
-            $table->foreignId('user_id');
-            $table->timestamp('created_at');
-            $table->timestamp('updated_at');
-        });
-
-        $create('relation_test_posts', function ($table): void {
-            $table->id();
-            $table->foreignId('user_id');
-            $table->string('title');
-            $table->timestamps();
-        });
+        $this->loadMigrationsFrom(__DIR__.'/database/migrations');
     }
 
     protected function getEnvironmentSetUp($app): void

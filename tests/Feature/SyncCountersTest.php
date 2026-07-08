@@ -46,6 +46,13 @@ class SyncCountersTest extends TestCase
 
     protected function tearDown(): void
     {
+        // Clear counters before parent::tearDown(). Testbench re-runs the
+        // package migrations' down() at teardown, and make_count_signed's
+        // down() reverts `count` to UNSIGNED — which throws on MySQL if any
+        // net-negative row from these sync tests is still present. (Other test
+        // classes already clear ModelCounter here for the same isolation reason.)
+        ModelCounter::query()->delete();
+
         if ($this->redisUnavailableReason() === null) {
             try {
                 Redis::connection('default')->flushdb();
@@ -149,19 +156,24 @@ class SyncCountersTest extends TestCase
         Relation::morphMap(['global' => SyncTestUser::class]);
 
         try {
-            $this->assertSame(1, (int) $this->user->getKey()); // non-zero id
+            // A real, non-zero owner id (the exact value is DB-assigned and,
+            // on MySQL, isn't reset by transaction rollback between tests, so
+            // don't assume 1 — just that it's non-zero and thus never the
+            // reserved global:0 token).
+            $ownerId = (int) $this->user->getKey();
+            $this->assertGreaterThan(0, $ownerId);
 
-            Counter::increment($this->user, 'downloads', 5); // → global:1:downloads
+            Counter::increment($this->user, 'downloads', 5); // → global:<id>:downloads
             Counter::incrementGlobal('downloads', 9);        // → global:0:downloads
 
             $key = Counter::redisKey($this->user, 'downloads');
-            $this->assertStringContainsString(':global:1:', $key);
+            $this->assertStringContainsString(":global:{$ownerId}:", $key);
 
             $exit = Artisan::call('counter:sync');
             $this->assertSame(0, $exit, Artisan::output());
 
             // Owned row preserved with its real owner.
-            $owned = ModelCounter::query()->where('owner_type', 'global')->where('owner_id', 1)->where('key', 'downloads')->first();
+            $owned = ModelCounter::query()->where('owner_type', 'global')->where('owner_id', $ownerId)->where('key', 'downloads')->first();
             $this->assertNotNull($owned);
             $this->assertEquals(5, $owned->count);
 
