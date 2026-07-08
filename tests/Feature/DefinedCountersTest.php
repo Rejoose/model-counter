@@ -66,14 +66,6 @@ class DefinedCountersTest extends TestCase
     {
         parent::setUp();
 
-        if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('defined_counter_users')) {
-            $this->app['db']->connection()->getSchemaBuilder()->create('defined_counter_users', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->timestamps();
-            });
-        }
-
         $this->user = DefinedCounterUser::create(['name' => 'Defined User']);
     }
 

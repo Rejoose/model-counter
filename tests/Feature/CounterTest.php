@@ -22,15 +22,6 @@ class CounterTest extends TestCase
     {
         parent::setUp();
 
-        // Create test user table if it doesn't exist
-        if (! $this->app['db']->connection()->getSchemaBuilder()->hasTable('test_users')) {
-            $this->app['db']->connection()->getSchemaBuilder()->create('test_users', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->timestamps();
-            });
-        }
-
         $this->user = TestUser::create(['name' => 'Test User']);
     }
 

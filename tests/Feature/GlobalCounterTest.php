@@ -16,20 +16,6 @@ use Rejoose\ModelCounter\Traits\HasCounters;
 
 class GlobalCounterTest extends TestCase
 {
-    protected function setUp(): void
-    {
-        parent::setUp();
-
-        $schema = $this->app['db']->connection()->getSchemaBuilder();
-        if (! $schema->hasTable('global_test_owners')) {
-            $schema->create('global_test_owners', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->timestamps();
-            });
-        }
-    }
-
     protected function tearDown(): void
     {
         ModelCounter::query()->delete();

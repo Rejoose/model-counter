@@ -2,6 +2,20 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.4.2] - 2026-07-08
+
+### Fixed
+- **`counter:sync` now reclaims Redis keys that drain to zero.** Sync deliberately uses `GET` + `DECRBY` (not `GETDEL`) so a failed DB write is retried and a concurrent increment mid-sync is preserved — but a fully-drained key was left at `0` forever. With interval counters minting a new key per period and sync running every minute, each run `SCAN`ned a monotonically growing set of dead keys and Redis memory grew with history, not activity. The `DECRBY` is now an atomic Lua `DECRBY` + `DEL`-if-zero per key, which reclaims drained keys while preserving the concurrent-increment guarantee (an increment lands before the script and keeps the key alive, or after and recreates it).
+- **`Interval::previousPeriods()` no longer skips a month/quarter near month-end.** For `Month`/`Quarter`, the date was decremented *before* being truncated, so from a day like May 31 `subMonths(1)` overflowed (April has no 31st) and `startOfMonth()` snapped back to the current period — duplicating it and silently skipping one. This corrupted `history()`, `recountPeriods()`, and interval `verify` runs invoked on the 29th–31st. The truncation now happens before the subtraction.
+- **`Counter::getMany()` batched read fixed.** It built prefix-less keys and handed them to a raw `MGET`, which read the wrong keys and returned all zeros (the per-key fallback masked it). It now uses `Repository::many()`, which `MGET`s with the cache-store prefix applied. `incrementMany()`/`decrementMany()` now pipeline their writes to Redis in a single round trip instead of one `INCR`/`DECR` per key.
+
+### Docs
+- Corrected the README / CLAUDE.md claim that sync uses `GETDEL` (it uses `GET` + `DECRBY`), and documented that `cache:clear` / `FLUSHDB` on the counter store discards all unsynced deltas — run `counter:sync` first.
+
+### Tests / CI
+- Added Redis-backed coverage for `getMany()`, the key-reclaim behaviour (asserted under both phpredis and Predis), the bulk-writer pipeline path, and month-end `previousPeriods()`.
+- Added a MySQL CI job. Test-suite table creation moved out of `setUp()`/`beforeEach()` into `TestCase::defineDatabaseMigrations()` so it runs before `RefreshDatabase`'s transaction — required for isolation on MySQL, where DDL auto-commits.
+
 ## [2.4.1] - 2026-06-12
 
 ### Fixed

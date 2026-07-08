@@ -13,29 +13,6 @@ use Rejoose\ModelCounter\Traits\HasCounters;
 
 class RecountCountersTest extends TestCase
 {
-    protected function setUp(): void
-    {
-        parent::setUp();
-
-        $schema = $this->app['db']->connection()->getSchemaBuilder();
-
-        if (! $schema->hasTable('recount_subjects')) {
-            $schema->create('recount_subjects', function ($table) {
-                $table->id();
-                $table->string('name');
-                $table->unsignedInteger('things_count')->default(0);
-                $table->timestamps();
-            });
-        }
-
-        if (! $schema->hasTable('recount_plain_models')) {
-            $schema->create('recount_plain_models', function ($table) {
-                $table->id();
-                $table->timestamps();
-            });
-        }
-    }
-
     protected function tearDown(): void
     {
         RecountSubject::query()->delete();

@@ -100,7 +100,7 @@ Defined in `.github/workflows/`:
 - **Interval enum:** `Day`, `Week`, `Month`, `Quarter`, `Year` with `periodKey()` for Redis/DB keys
 - **Direct mode:** Set `COUNTER_DIRECT=true` to bypass Redis and write straight to DB (useful for dev/testing)
 - **Query scopes:** `withCounter()` and `orderByCounter()` use JOINs to avoid N+1; respects configured table name
-- **Atomic operations:** Redis INCR/DECR for writes; GETDEL during sync; insert-or-update with retry for race conditions
+- **Atomic operations:** Redis INCR/DECR for writes; sync uses GET + DECRBY-by-read-amount (not GETDEL, for retry safety) and reclaims drained keys via an atomic Lua DECRBY+DEL-if-zero; insert-or-update with retry for race conditions
 - **Bulk operations:** `incrementMany()`/`decrementMany()` for batch counter updates
 - **Events:** Opt-in via `counter.events` config — dispatches `CounterIncremented`, `CounterDecremented`, `CounterReset`, `CounterSynced`
 - **Key validation:** Counter keys must be non-empty, no colons, max 100 chars
