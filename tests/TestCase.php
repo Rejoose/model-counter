@@ -6,6 +6,8 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Orchestra\Testbench\TestCase as Orchestra;
 use Rejoose\ModelCounter\ModelCounterServiceProvider;
 
+use function Orchestra\Testbench\load_migration_paths;
+
 abstract class TestCase extends Orchestra
 {
     use RefreshDatabase;
@@ -29,8 +31,17 @@ abstract class TestCase extends Orchestra
         // every driver — creating the owner tables imperatively in
         // setUp()/beforeEach() broke on MySQL (migrate:fresh drops non-migration
         // tables, and MySQL's auto-committing DDL destroyed transaction isolation).
-        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
-        $this->loadMigrationsFrom(__DIR__.'/database/migrations');
+        //
+        // Register the paths directly rather than via loadMigrationsFrom(): that
+        // helper only registers paths for the first test of the process. For
+        // every later test it runs the migrator and schedules a migrate:rollback
+        // at teardown, and on MySQL that DDL implicitly commits the still-open
+        // test transaction, so the interval migration's down() tripped over the
+        // period rows a test had just written.
+        load_migration_paths($this->app, [
+            __DIR__.'/../database/migrations',
+            __DIR__.'/database/migrations',
+        ]);
     }
 
     protected function getEnvironmentSetUp($app): void

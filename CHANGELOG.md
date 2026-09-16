@@ -12,6 +12,10 @@ All notable changes to `model-counter` will be documented in this file.
 - Every verify report now carries `'gauge' => bool`.
 - `Counter::latest()` / `latestGlobal()` / `ModelCounter::latestFor()` accept an optional `?Carbon $upTo` to read the latest snapshot at or before a date. New `ModelCounter::latestRowFor()` returns that row (period and count) or null.
 
+### Tests / CI
+- The suite registers its migration paths with Testbench's `load_migration_paths()` instead of `loadMigrationsFrom()`. The latter only registers paths for the first test of a process; for every later test it runs the migrator and schedules a `migrate:rollback` at teardown, and on MySQL that DDL implicitly commits the open test transaction, so the interval migration's `down()` hit a duplicate-key error on the period rows a test had just written. The MySQL job now passes and runs in seconds instead of re-migrating per test.
+- `parseRedisKey()` in `counter:sync` dropped an unreachable part-count guard that PHPStan 2.2 flags as always false.
+
 ### Upgrade notes
 - Nothing changes for definitions that do not call `->gauge()`. Consumers that skip gauge keys by hand (Rejoose-app `PartnerCounter::gaugeKeys()`, the data-partner-portal's unique-client / vendor gauges) can declare `->gauge()` and drop the manual skip and the copied recount loop.
 
