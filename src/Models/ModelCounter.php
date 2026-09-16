@@ -645,17 +645,36 @@ class ModelCounter extends Model
     /**
      * Get the most recent snapshot value for an interval-based counter
      * (the row with the latest period_start). Returns 0 when none exists.
+     * Pass $upTo to ignore periods starting after that date.
      */
     public static function latestFor(
         ?Model $owner,
         string $key,
-        Interval $interval
+        Interval $interval,
+        ?Carbon $upTo = null
     ): int {
-        return (int) (static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
+        return (int) (static::latestRowFor($owner, $key, $interval, $upTo)->count ?? 0);
+    }
+
+    /**
+     * The most recent snapshot row for an interval-based counter, optionally
+     * restricted to periods starting at or before $upTo. Null when none exists.
+     */
+    public static function latestRowFor(
+        ?Model $owner,
+        string $key,
+        Interval $interval,
+        ?Carbon $upTo = null
+    ): ?self {
+        $query = static::ownerQuery($owner?->getMorphClass(), $owner?->getKey())
             ->where('key', $key)
-            ->where('interval', $interval->value)
-            ->orderByDesc('period_start')
-            ->value('count') ?? 0);
+            ->where('interval', $interval->value);
+
+        if ($upTo !== null) {
+            $query->where('period_start', '<=', $interval->periodStart($upTo)->toDateString());
+        }
+
+        return $query->orderByDesc('period_start')->first();
     }
 
     /**

@@ -14,6 +14,7 @@ Perfect for tracking downloads, views, likes, visits, or any metric that needs t
 - 🔄 **Efficient Sync**: Scheduled batch syncing to database reduces DB load by 99%
 - 📅 **Interval Counting**: Track counts by day, week, month, quarter, or year
 - 🔁 **Safe Recount**: Safely recalculate counters from source data
+- 📐 **Declared Counters & Gauges**: Declare each counter's source of truth once, then recount and verify them in bulk — including absolute-value gauges
 - 📦 **Bulk Operations**: Increment or decrement multiple counters in one call
 - 🎯 **Polymorphic**: Works with any Eloquent model as the "owner"
 - 📣 **Events**: Opt-in event dispatching for counter changes and syncs
@@ -315,6 +316,78 @@ $user->posts()->recount('posts', Interval::Day, 30);
 // Recount last 3 months starting from a specific date
 $user->posts()->recount('posts', Interval::Day, 90, now()->subMonth());
 
+```
+
+## 📐 Declared Counters, Verify & Gauges
+
+Implement `DefinesCounters` to declare every counter a model owns together with its source-of-truth query. The package can then recount and verify all of them without per-call-site closures, and the `counter:recount {model}` command chunks over the whole table.
+
+```php
+use Rejoose\ModelCounter\Contracts\DefinesCounters;
+use Rejoose\ModelCounter\CounterDefinition;
+use Rejoose\ModelCounter\Enums\CounterVerifyMode;
+use Rejoose\ModelCounter\Enums\Interval;
+
+class Partner extends Model implements DefinesCounters
+{
+    use HasCounters;
+
+    public function counterDefinitions(): array
+    {
+        return [
+            // Additive delta per day, recountable from source.
+            'evoices_created' => CounterDefinition::make('evoices_created')
+                ->interval(Interval::Day)
+                ->recountUsing(fn (Carbon $start, Carbon $end) => $this->evoices()
+                    ->whereBetween('created_at', [$start, $end])->count()),
+
+            // Cumulative event counter: the source only sees the latest state,
+            // so stored must be *at least* the source and is never recounted.
+            'evoices_updated' => CounterDefinition::make('evoices_updated')
+                ->interval(Interval::Day)
+                ->verifyMode(CounterVerifyMode::AtLeast)
+                ->recountUsing(fn (Carbon $start, Carbon $end) => $this->evoices()
+                    ->whereBetween('updated_at', [$start, $end])->count()),
+
+            // Gauge: each day stores the *all-time* distinct count as of that
+            // day, written by a snapshot job — an absolute value, not a delta.
+            'unique_clients' => CounterDefinition::make('unique_clients')
+                ->interval(Interval::Day)
+                ->gauge()
+                ->recountUsing(fn (Carbon $start, Carbon $end) => $this->evoices()
+                    ->where('created_at', '<=', $end)->distinct()->count('client_id')),
+        ];
+    }
+}
+```
+
+```php
+// Rebuild every recountable counter for a date range (AtLeast-mode ones are skipped).
+$partner->recountAllCounters(now()->startOfYear(), now());
+
+// Read-only drift report per counter (and per period for interval counters).
+$report = $partner->verifyAllCounters(now()->startOfYear(), now());
+$report['evoices_created']['matches'];  // bool
+$report['evoices_created']['periods'];  // ['2026-01-01' => ['stored' => 3, 'actual' => 3, 'matches' => true], ...]
+
+// One counter only
+$partner->verifyCounter('unique_clients');
+```
+
+### Gauges
+
+Mark a definition with `->gauge()` when each period holds an absolute value (a daily "distinct clients so far" snapshot written with `Counter::snapshot()` or `Counter::bulkSet()`). A gauge's recount closure still receives `($start, $end)` and returns the value *as of `$end`*. Declaring it changes two things:
+
+- `recountAllCounters()` recounts a gauge **once**, for the period containing the range end, instead of once per period. Every stored period already holds the full value, so recounting each one would cost a fresh aggregate per day for nothing.
+- `verifyCounter()` / `verifyAllCounters()` check only the **latest stored snapshot at or before the range end**, against the source as of that snapshot's period end. `stored` and `actual` are that single value, never a sum across periods, and `periods` holds that one period. The snapshot job may not have run every day, so the latest row is looked up rather than assumed to sit on the boundary. A gauge with no snapshot yet reports `stored` 0.
+
+Every verify report carries `'gauge' => bool` so consumers can tell the two shapes apart. A gauge must declare an interval; recounting or verifying a gauge without one throws a `LogicException`.
+
+`Counter::latest()` / `latestGlobal()` accept an optional `$upTo` date to read the latest snapshot at or before that date:
+
+```php
+Counter::latest($partner, 'unique_clients', Interval::Day);                 // newest snapshot
+Counter::latest($partner, 'unique_clients', Interval::Day, now()->subWeek()); // newest as of a week ago
 ```
 
 ## ⚡ Efficient Querying

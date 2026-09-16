@@ -773,17 +773,18 @@ class Counter
 
     /**
      * The most recent snapshot value for an interval-based gauge (the row with
-     * the latest period_start). Returns 0 when none exists.
+     * the latest period_start). Returns 0 when none exists. Pass $upTo to read
+     * the latest snapshot at or before that date instead of the newest overall.
      */
-    public static function latest(?Model $owner, string $key, Interval $interval): int
+    public static function latest(?Model $owner, string $key, Interval $interval, ?Carbon $upTo = null): int
     {
         static::validateKey($key);
 
-        return ModelCounter::latestFor($owner, $key, $interval);
+        return ModelCounter::latestFor($owner, $key, $interval, $upTo);
     }
 
-    public static function latestGlobal(string $key, Interval $interval): int
+    public static function latestGlobal(string $key, Interval $interval, ?Carbon $upTo = null): int
     {
-        return static::latest(null, $key, $interval);
+        return static::latest(null, $key, $interval, $upTo);
     }
 }

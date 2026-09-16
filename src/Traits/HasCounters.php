@@ -11,6 +11,7 @@ use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\CounterDefinition;
 use Rejoose\ModelCounter\Enums\CounterVerifyMode;
 use Rejoose\ModelCounter\Enums\Interval;
+use Rejoose\ModelCounter\Models\ModelCounter;
 
 trait HasCounters
 {
@@ -164,6 +165,11 @@ trait HasCounters
      * AtLeast-mode definitions are skipped — their source query can't reproduce
      * cumulative event history, so recounting would clobber the live total.
      *
+     * Gauge definitions (CounterDefinition::gauge()) are recounted once, for the
+     * period containing $to, since every stored period already holds the full
+     * value as of that period — recounting each one would cost a fresh aggregate
+     * per period for no gain.
+     *
      * @return array<string, int|array<string, int|string>> Counter key => result.
      *                                                      Recounted: int (non-interval) or period map.
      *                                                      Skipped: ['skipped' => true, 'reason' => ...].
@@ -191,11 +197,20 @@ trait HasCounters
 
     /**
      * Compare a stored counter value against the source-of-truth defined on the model
-     * without writing anything. For interval counters, drift is reported per period.
+     * without writing anything. For interval counters, drift is reported per period
+     * and `stored` / `actual` are the sums across the range.
+     *
+     * For gauges (CounterDefinition::gauge()) only the latest stored snapshot at or
+     * before $to is checked, against the source as of that snapshot's period end
+     * ($from is ignored). `stored` / `actual` are that single value, never a sum,
+     * and `periods` holds that one period. A gauge with no snapshot yet reports
+     * stored 0 for the period containing $to.
      *
      * @return array{
      *   key: string,
      *   interval: ?string,
+     *   mode: string,
+     *   gauge: bool,
      *   matches: bool,
      *   stored: int,
      *   actual: int,
@@ -309,6 +324,20 @@ trait HasCounters
      */
     private function recountFromDefinition(CounterDefinition $definition, ?Carbon $from, ?Carbon $to): int|array
     {
+        if ($definition->isGauge()) {
+            $interval = $this->gaugeInterval($definition);
+            $periodStart = $interval->periodStart($to ?? now());
+
+            $value = $this->recountCounter(
+                $definition->key,
+                fn () => $definition->runRecount($periodStart, $interval->periodEnd($periodStart)),
+                $interval,
+                $periodStart,
+            );
+
+            return [$interval->periodKey($periodStart) => $value];
+        }
+
         if ($definition->interval === null) {
             return $this->recountCounter(
                 $definition->key,
@@ -332,6 +361,10 @@ trait HasCounters
      */
     private function verifyFromDefinition(CounterDefinition $definition, ?Carbon $from, ?Carbon $to): array
     {
+        if ($definition->isGauge()) {
+            return $this->verifyGaugeFromDefinition($definition, $to);
+        }
+
         if ($definition->interval === null) {
             $stored = $this->counter($definition->key);
             $actual = $definition->runRecount();
@@ -340,6 +373,7 @@ trait HasCounters
                 'key' => $definition->key,
                 'interval' => null,
                 'mode' => $definition->verifyMode->value,
+                'gauge' => false,
                 'stored' => $stored,
                 'actual' => $actual,
                 'matches' => $this->compareCounterValues($stored, $actual, $definition->verifyMode),
@@ -375,11 +409,61 @@ trait HasCounters
             'key' => $definition->key,
             'interval' => $definition->interval->value,
             'mode' => $definition->verifyMode->value,
+            'gauge' => false,
             'stored' => $totalStored,
             'actual' => $totalActual,
             'matches' => $allMatch,
             'periods' => $perPeriod,
         ];
+    }
+
+    /**
+     * Verify a gauge by its latest snapshot only. The snapshot job may not have
+     * run every period, so the row is looked up as "latest at or before the
+     * period containing $to" rather than assumed to sit exactly on the boundary,
+     * and the source is recounted as of *that* row's period end.
+     *
+     * @return array<string, mixed>
+     */
+    private function verifyGaugeFromDefinition(CounterDefinition $definition, ?Carbon $to): array
+    {
+        $interval = $this->gaugeInterval($definition);
+        $boundary = $interval->periodStart($to ?? now());
+
+        $latest = ModelCounter::latestRowFor($this, $definition->key, $interval, $boundary);
+        $periodStart = $latest?->period_start !== null
+            ? $interval->periodStart(Carbon::parse($latest->period_start))
+            : $boundary;
+
+        $stored = $this->counter($definition->key, $interval, $periodStart);
+        $actual = $definition->runRecount($periodStart, $interval->periodEnd($periodStart));
+        $matches = $this->compareCounterValues($stored, $actual, $definition->verifyMode);
+
+        return [
+            'key' => $definition->key,
+            'interval' => $interval->value,
+            'mode' => $definition->verifyMode->value,
+            'gauge' => true,
+            'stored' => $stored,
+            'actual' => $actual,
+            'matches' => $matches,
+            'periods' => [
+                $interval->periodKey($periodStart) => [
+                    'stored' => $stored,
+                    'actual' => $actual,
+                    'matches' => $matches,
+                ],
+            ],
+        ];
+    }
+
+    private function gaugeInterval(CounterDefinition $definition): Interval
+    {
+        if ($definition->interval === null) {
+            throw new \LogicException("Gauge counter '{$definition->key}' on ".static::class.' must declare an interval.');
+        }
+
+        return $definition->interval;
     }
 
     private function compareCounterValues(int $stored, int $actual, CounterVerifyMode $mode): bool

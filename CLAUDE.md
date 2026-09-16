@@ -105,6 +105,8 @@ Defined in `.github/workflows/`:
 - **Events:** Opt-in via `counter.events` config — dispatches `CounterIncremented`, `CounterDecremented`, `CounterReset`, `CounterSynced`
 - **Key validation:** Counter keys must be non-empty, no colons, max 100 chars
 - **Recount:** `recount()` and `recountPeriods()` recalculate counters from source data using relationship macros
+- **Declared counters:** `DefinesCounters` + `CounterDefinition` (`src/CounterDefinition.php`) declare each counter's interval, verify mode and source-of-truth closure; `recountAllCounters()` / `verifyAllCounters()` on the trait and `counter:recount {model}` consume them
+- **Gauges:** `CounterDefinition::gauge()` marks an interval counter whose periods hold absolute snapshot values (not deltas). Recount runs once for the range-end period; verify checks only the latest snapshot at or before the range end (never a sum). Reads: `Counter::snapshot()`, `Counter::latest(..., $upTo)`, `ModelCounter::latestRowFor()`
 - **Pruning:** `counter:prune` command with configurable per-interval retention periods
 - **DB-first safety:** `set()` and `reset()` write to DB before clearing cache to prevent data loss
 

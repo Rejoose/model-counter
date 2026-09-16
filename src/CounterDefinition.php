@@ -15,6 +15,7 @@ class CounterDefinition
         public ?Interval $interval = null,
         public ?Closure $recount = null,
         public CounterVerifyMode $verifyMode = CounterVerifyMode::Equal,
+        public bool $gauge = false,
     ) {}
 
     public static function make(string|BackedEnum $key): self
@@ -34,6 +35,33 @@ class CounterDefinition
         $this->verifyMode = $mode;
 
         return $this;
+    }
+
+    /**
+     * Declare this counter a gauge: each period stores an *absolute* value
+     * (e.g. "all-time distinct clients as of that day"), written by a snapshot
+     * job via Counter::snapshot() / Counter::bulkSet(), never an additive delta.
+     *
+     * A gauge's recount closure still receives (Carbon $start, Carbon $end) and
+     * must return the value as of $end. Because each row is already the full
+     * value, recountAllCounters() recounts a gauge once (the period at the end
+     * of the range) instead of once per period, and verify compares the latest
+     * stored snapshot at or before the range end against the source instead of
+     * summing every period.
+     *
+     * Only meaningful together with interval(); a gauge without an interval
+     * throws when recounted or verified.
+     */
+    public function gauge(bool $gauge = true): self
+    {
+        $this->gauge = $gauge;
+
+        return $this;
+    }
+
+    public function isGauge(): bool
+    {
+        return $this->gauge;
     }
 
     /**

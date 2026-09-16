@@ -2,6 +2,19 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.5.0] - 2026-09-16
+
+### Added
+- **First-class gauges on counter definitions.** `CounterDefinition::gauge()` / `isGauge()` declare that each period of an interval counter stores an *absolute* value (a daily "all-time distinct" snapshot written by `Counter::snapshot()` / `bulkSet()`) rather than an additive delta. Previously the package could read gauges (`latest()`, `bulkSet(skipZero:)`) but not declare them, so every consumer hand-rolled a key list and copied the trait's private `recountFromDefinition()` to skip it. Declaring a gauge changes `recountAllCounters()` and `verifyCounter()` / `verifyAllCounters()`:
+  - **Recount once, not per period.** A gauge is recounted only for the period containing the range end. Every stored period already holds the full value, so the previous per-period recount cost one fresh aggregate per day (~259 for a year-to-date audit) for nothing.
+  - **Verify the latest snapshot, not a sum.** The report compares the latest stored snapshot at or before the range end against the source as of that snapshot's period end. `stored` / `actual` are that single value (the old sum of ~259 daily all-time values was meaningless) and `periods` holds that one period. The snapshot job may not have run every day, so the row is looked up as "latest at or before" instead of assumed to sit on the boundary. A gauge with no snapshot reports `stored` 0.
+  - A gauge must declare an interval; recount/verify throw a `LogicException` otherwise.
+- Every verify report now carries `'gauge' => bool`.
+- `Counter::latest()` / `latestGlobal()` / `ModelCounter::latestFor()` accept an optional `?Carbon $upTo` to read the latest snapshot at or before a date. New `ModelCounter::latestRowFor()` returns that row (period and count) or null.
+
+### Upgrade notes
+- Nothing changes for definitions that do not call `->gauge()`. Consumers that skip gauge keys by hand (Rejoose-app `PartnerCounter::gaugeKeys()`, the data-partner-portal's unique-client / vendor gauges) can declare `->gauge()` and drop the manual skip and the copied recount loop.
+
 ## [2.4.2] - 2026-07-08
 
 ### Fixed
