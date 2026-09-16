@@ -606,10 +606,8 @@ class SyncCounters extends Command
             }
         }
 
-        if (count($parts) < 3) {
-            return null;
-        }
-
+        // At least 3 parts remain: the guard above rejects < 3, and the
+        // interval branch only pops 2 when there are >= 5.
         $counterKey = array_pop($parts);
         $ownerId = array_pop($parts);
         $ownerType = implode(':', $parts);
