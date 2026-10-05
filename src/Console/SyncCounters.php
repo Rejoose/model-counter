@@ -48,7 +48,7 @@ class SyncCounters extends Command
      * Times each sync phase. Resolved per run from the container, so an
      * app binding (e.g. Sentry spans) applies without overriding the command.
      */
-    protected SyncInstrumenter $instrumenter;
+    protected ?SyncInstrumenter $instrumenter = null;
 
     public function handle(): int
     {
@@ -60,7 +60,8 @@ class SyncCounters extends Command
         $repository = Cache::store($storeName);
         $store = $repository->getStore();
         $counterPrefix = (string) config('counter.prefix');
-        $batchSize = (int) config('counter.sync_batch_size', 1000);
+        // At least 1: the batch buffer below flushes on count >= $batchSize.
+        $batchSize = max(1, (int) config('counter.sync_batch_size', 1000));
 
         if ($storeName === 'array') {
             $this->info('Using array cache store - sync is not needed.');
@@ -93,7 +94,7 @@ class SyncCounters extends Command
         $lock = $store->lock('counter-sync-lock', (int) $this->option('lock-ttl'));
 
         try {
-            $acquired = $this->instrumenter->measure(
+            $acquired = $this->measurePhase(
                 'counter.sync.lock',
                 ['store' => $storeName],
                 fn () => $lock->get(),
@@ -116,6 +117,52 @@ class SyncCounters extends Command
             return self::FAILURE;
         } finally {
             optional($lock)->release();
+        }
+    }
+
+    /**
+     * The instrumenter for this run. handle() resolves a fresh one per run;
+     * this falls back to the container when a subclass or a
+     * test calls the sync methods without going through handle().
+     */
+    protected function instrumenter(): SyncInstrumenter
+    {
+        return $this->instrumenter ??= $this->laravel->make(SyncInstrumenter::class);
+    }
+
+    /**
+     * Run one sync phase through the instrumenter, so that the instrumenter
+     * can never change what sync does to the data. If the instrumenter throws
+     * before running the phase, the phase runs uninstrumented. If it throws
+     * after the phase finished (e.g. while closing a span), its result is
+     * kept: throwing away a committed upsert's result would skip the Redis
+     * drain and double-count on the next run. An exception from the phase
+     * itself propagates unchanged.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    protected function measurePhase(string $op, array $data, \Closure $callback): mixed
+    {
+        $started = false;
+        $finished = false;
+        $result = null;
+
+        try {
+            return $this->instrumenter()->measure($op, $data, function () use ($callback, &$started, &$finished, &$result) {
+                $started = true;
+                $result = $callback();
+                $finished = true;
+
+                return $result;
+            });
+        } catch (\Throwable $e) {
+            if ($started && ! $finished) {
+                throw $e;
+            }
+
+            $this->warn("Sync instrumenter failed on {$op}: ".$e->getMessage());
+
+            return $finished ? $result : $callback();
         }
     }
 
@@ -148,15 +195,14 @@ class SyncCounters extends Command
         // DBSIZE is what SCAN has to walk, so it explains a slow scan. Skip
         // the extra round trip when nothing records it.
         $scanData = ['pattern' => $searchPattern];
-        if (! $this->instrumenter instanceof NullSyncInstrumenter) {
+        if (! $this->instrumenter() instanceof NullSyncInstrumenter) {
             $scanData['dbsize'] = $this->dbSize($redis);
         }
 
-        // Process each SCAN batch as it comes back instead of accumulating
-        // all matching keys in memory first - at scale the keyspace can be
-        // in the millions and buffering all of it would blow up the sync
-        // worker.
-        $this->instrumenter->measure(
+        // Sync in batches as SCAN pages come back instead of collecting all
+        // matching keys first - at scale the keyspace can be in the millions
+        // and holding all of it would blow up the sync worker.
+        $this->measurePhase(
             'counter.sync.scan',
             $scanData,
             function () use ($redis, $searchPattern, $batchSize, $connectionPrefix, $logicalPrefix, $isDryRun, &$totalFound, &$synced, &$skipped, &$errors): void {
@@ -225,6 +271,18 @@ class SyncCounters extends Command
         // cursor", so it must start from "0".
         $cursor = $redis instanceof PhpRedisConnection ? null : '0';
 
+        // SCAN's COUNT is a hint for how many slots to walk, not how many
+        // keys match. In a database shared with other keys most pages hold a
+        // handful of counter keys, and syncing page by page then pays a full
+        // GET/upsert/reclaim round trip for each handful. Buffer matches
+        // across pages and sync them in batches of $batchSize instead.
+        //
+        // Keyed by wire key: SCAN may return a key more than once, and the
+        // same key twice in one batch would be read and upserted twice. A
+        // duplicate in a later batch is harmless, since by then the key has
+        // been drained and reads back as 0 or missing.
+        $buffer = [];
+
         do {
             $result = $redis->scan($cursor, [
                 'match' => $searchPattern,
@@ -246,23 +304,52 @@ class SyncCounters extends Command
             }
             $totalFound += count($foundKeys);
 
-            $this->instrumenter->measure(
-                'counter.sync.batch',
-                ['keys' => count($foundKeys)],
-                function () use ($redis, $foundKeys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
-                    $this->processBatch(
-                        $redis,
-                        $foundKeys,
-                        $connectionPrefix,
-                        $logicalPrefix,
-                        $isDryRun,
-                        $synced,
-                        $skipped,
-                        $errors
-                    );
-                },
-            );
+            foreach ($foundKeys as $wireKey) {
+                $buffer[$wireKey] = true;
+            }
+
+            while (count($buffer) >= $batchSize) {
+                $batch = array_slice($buffer, 0, $batchSize, true);
+                $buffer = array_slice($buffer, $batchSize, null, true);
+
+                $this->measureBatch(array_map('strval', array_keys($batch)), $redis, $connectionPrefix, $logicalPrefix, $isDryRun, $synced, $skipped, $errors);
+            }
         } while ((string) $cursor !== '0');
+
+        if ($buffer !== []) {
+            $this->measureBatch(array_map('strval', array_keys($buffer)), $redis, $connectionPrefix, $logicalPrefix, $isDryRun, $synced, $skipped, $errors);
+        }
+    }
+
+    /**
+     * @param  array<int, string>  $keys
+     */
+    protected function measureBatch(
+        array $keys,
+        object $redis,
+        string $connectionPrefix,
+        string $logicalPrefix,
+        bool $isDryRun,
+        int &$synced,
+        int &$skipped,
+        int &$errors
+    ): void {
+        $this->measurePhase(
+            'counter.sync.batch',
+            ['keys' => count($keys)],
+            function () use ($redis, $keys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
+                $this->processBatch(
+                    $redis,
+                    $keys,
+                    $connectionPrefix,
+                    $logicalPrefix,
+                    $isDryRun,
+                    $synced,
+                    $skipped,
+                    $errors
+                );
+            },
+        );
     }
 
     /**
@@ -285,7 +372,7 @@ class SyncCounters extends Command
      */
     protected function measureReclaim(object $redis, array $plan, string $kind): void
     {
-        $this->instrumenter->measure(
+        $this->measurePhase(
             'counter.sync.reclaim',
             ['keys' => count($plan), 'kind' => $kind],
             fn () => $this->pipelineDecrBy($redis, $plan),
@@ -392,7 +479,7 @@ class SyncCounters extends Command
         // to per-key GETs so the offending key can be isolated and the
         // batch can continue.
         try {
-            $values = $this->instrumenter->measure(
+            $values = $this->measurePhase(
                 'counter.sync.get',
                 ['keys' => count($rawKeysToRead)],
                 fn () => $this->pipelineGet($redis, $rawKeysToRead),
@@ -490,7 +577,7 @@ class SyncCounters extends Command
         // path. On SQL failure we re-run per-row so a single bad row
         // doesn't fail the entire batch - matches the previous
         // try/catch-per-key behaviour.
-        $this->instrumenter->measure(
+        $this->measurePhase(
             'counter.sync.upsert',
             ['keys' => count($deltas)],
             function () use ($deltas, &$decrPlan, &$errors): void {

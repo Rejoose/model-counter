@@ -147,11 +147,12 @@ Fixes #123
 
 ## Release Process
 
-1. Update CHANGELOG.md
-2. Update version in composer.json
-3. Create a new tag
-4. Push tag to GitHub
-5. Create release notes on GitHub
+1. Update CHANGELOG.md in the release commit
+2. Create a tag without a "v" prefix (e.g. `2.6.1`) on the merged commit
+3. Push the tag to GitHub
+4. Create release notes on GitHub
+
+composer.json has no `"version"` field on purpose: Composer reads the version from the tag. Don't add one back; a stale value makes Composer skip the tag.
 
 ## Questions?
 

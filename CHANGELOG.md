@@ -2,6 +2,17 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.6.1] - 2026-10-05
+
+### Fixed
+- **A failing sync instrumenter can no longer cause a double count.** In 2.6.0, an instrumenter that threw after the upsert had committed (e.g. while closing a Sentry span) skipped the Redis drain, so the next sync added the same delta again. Every phase now runs through `measurePhase()`. If the instrumenter throws before running a phase, the phase runs uninstrumented. If it throws after, the phase's result is kept. Either way sync logs a warning and carries on. An exception from the phase itself still propagates as before.
+- `SyncCounters` no longer hits an uninitialised property when a subclass or test calls the sync methods without `handle()`; it resolves the instrumenter from the container.
+
+### Changed
+- **`counter:sync` buffers matched keys across `SCAN` pages and syncs them in batches of `sync_batch_size`.** `SCAN`'s `COUNT` is a hint for how many slots to walk, not how many keys match. On a Redis database shared with other keys, most pages held only a few counter keys, and sync paid a full GET, upsert and reclaim round trip per page. In a benchmark, 1,000 counter keys in a database with 500k other keys took ~1.6 s, mostly ~440 tiny upserts; only ~0.2 s was `SCAN`. Each batch now holds `sync_batch_size` keys (the last one the remainder), so a shared database adds about the `SCAN` time to a normal sync. In the same benchmark, sync now takes 405 ms (261 ms of it `SCAN`) instead of 1,558 ms, and 140 ms instead of 453 ms with 100k other keys. The buffer deduplicates keys, because `SCAN` can return a key twice and both copies in one batch would be counted twice. On a dedicated database, pages were already full, so nothing changes there.
+- `counter.sync.batch` instrumentation spans now cover one buffered batch instead of one `SCAN` page.
+- `sync_batch_size` values below 1 are treated as 1.
+
 ## [2.6.0] - 2026-10-05
 
 ### Added

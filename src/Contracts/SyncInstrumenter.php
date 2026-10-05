@@ -15,13 +15,22 @@ use Closure;
  * Implementations must call `$callback` exactly once, return its result
  * unchanged and let its exceptions propagate. Bind a stateless
  * implementation: under Octane the container may share it across requests.
+ *
+ * An instrumenter's own failure never changes the sync: if it throws before
+ * running the phase, the phase runs uninstrumented; if it throws after, the
+ * phase's result is kept. Either way sync logs a warning and carries on.
  */
 interface SyncInstrumenter
 {
     /**
      * @param  string  $op  Phase name, e.g. `counter.sync.batch`.
-     * @param  array<string, mixed>  $data  Context such as `keys` (keys in
-     *                                      this phase) and `dbsize`.
+     * @param  array<string, mixed>  $data  Context: `keys` (keys in this
+     *                                      phase) on batch, get, upsert and
+     *                                      reclaim; `kind` (`drain` or `zero`)
+     *                                      on reclaim; `store` on lock;
+     *                                      `pattern` and `dbsize` (int or null;
+     *                                      only read when a non-default
+     *                                      instrumenter is bound) on scan.
      */
     public function measure(string $op, array $data, Closure $callback): mixed;
 }
