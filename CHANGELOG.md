@@ -2,6 +2,14 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.5.1] - 2026-10-05
+
+### Fixed
+- **`counter:sync` now reclaims keys that net to exactly zero.** A counter incremented and then decremented back to 0 before a sync has no delta to write, so sync skipped it — but never deleted it. The `"0"` key lingered forever and every later per-minute `SCAN` walked it. Sync now runs those keys through the same atomic `RECLAIM_SCRIPT` with an amount of 0 (`DECRBY 0` + `DEL`-if-zero), so a write that lands after the `GET` keeps the key alive. Missing and non-numeric values are left alone, `--dry-run` deletes nothing, and a failed reclaim only warns and retries on the next run.
+
+### Upgrade notes
+- No action needed. `SCAN` still walks the whole Redis database of the counter store, so give `counter.store` a dedicated Redis database when it would otherwise share one with a large application cache (a `cache:clear` on a shared store also discards unsynced deltas).
+
 ## [2.5.0] - 2026-09-16
 
 ### Added
