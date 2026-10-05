@@ -15,6 +15,10 @@ use Closure;
  * Implementations must call `$callback` exactly once, return its result
  * unchanged and let its exceptions propagate. Bind a stateless
  * implementation: under Octane the container may share it across requests.
+ *
+ * An instrumenter's own failure never changes the sync: if it throws before
+ * running the phase, the phase runs uninstrumented; if it throws after, the
+ * phase's result is kept. Either way sync logs a warning and carries on.
  */
 interface SyncInstrumenter
 {

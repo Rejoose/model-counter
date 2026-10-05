@@ -94,7 +94,7 @@ class SyncCounters extends Command
         $lock = $store->lock('counter-sync-lock', (int) $this->option('lock-ttl'));
 
         try {
-            $acquired = $this->instrumenter()->measure(
+            $acquired = $this->measurePhase(
                 'counter.sync.lock',
                 ['store' => $storeName],
                 fn () => $lock->get(),
@@ -128,6 +128,42 @@ class SyncCounters extends Command
     protected function instrumenter(): SyncInstrumenter
     {
         return $this->instrumenter ??= $this->laravel->make(SyncInstrumenter::class);
+    }
+
+    /**
+     * Run one sync phase through the instrumenter, so that the instrumenter
+     * can never change what sync does to the data. If the instrumenter throws
+     * before running the phase, the phase runs uninstrumented. If it throws
+     * after the phase finished (e.g. while closing a span), its result is
+     * kept: throwing away a committed upsert's result would skip the Redis
+     * drain and double-count on the next run. An exception from the phase
+     * itself propagates unchanged.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    protected function measurePhase(string $op, array $data, \Closure $callback): mixed
+    {
+        $started = false;
+        $finished = false;
+        $result = null;
+
+        try {
+            return $this->instrumenter()->measure($op, $data, function () use ($callback, &$started, &$finished, &$result) {
+                $started = true;
+                $result = $callback();
+                $finished = true;
+
+                return $result;
+            });
+        } catch (\Throwable $e) {
+            if ($started && ! $finished) {
+                throw $e;
+            }
+
+            $this->warn("Sync instrumenter failed on {$op}: ".$e->getMessage());
+
+            return $finished ? $result : $callback();
+        }
     }
 
     protected function runSync(
@@ -166,7 +202,7 @@ class SyncCounters extends Command
         // Sync in batches as SCAN pages come back instead of collecting all
         // matching keys first - at scale the keyspace can be in the millions
         // and holding all of it would blow up the sync worker.
-        $this->instrumenter()->measure(
+        $this->measurePhase(
             'counter.sync.scan',
             $scanData,
             function () use ($redis, $searchPattern, $batchSize, $connectionPrefix, $logicalPrefix, $isDryRun, &$totalFound, &$synced, &$skipped, &$errors): void {
@@ -298,7 +334,7 @@ class SyncCounters extends Command
         int &$skipped,
         int &$errors
     ): void {
-        $this->instrumenter()->measure(
+        $this->measurePhase(
             'counter.sync.batch',
             ['keys' => count($keys)],
             function () use ($redis, $keys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
@@ -336,7 +372,7 @@ class SyncCounters extends Command
      */
     protected function measureReclaim(object $redis, array $plan, string $kind): void
     {
-        $this->instrumenter()->measure(
+        $this->measurePhase(
             'counter.sync.reclaim',
             ['keys' => count($plan), 'kind' => $kind],
             fn () => $this->pipelineDecrBy($redis, $plan),
@@ -443,7 +479,7 @@ class SyncCounters extends Command
         // to per-key GETs so the offending key can be isolated and the
         // batch can continue.
         try {
-            $values = $this->instrumenter()->measure(
+            $values = $this->measurePhase(
                 'counter.sync.get',
                 ['keys' => count($rawKeysToRead)],
                 fn () => $this->pipelineGet($redis, $rawKeysToRead),
@@ -541,7 +577,7 @@ class SyncCounters extends Command
         // path. On SQL failure we re-run per-row so a single bad row
         // doesn't fail the entire batch - matches the previous
         // try/catch-per-key behaviour.
-        $this->instrumenter()->measure(
+        $this->measurePhase(
             'counter.sync.upsert',
             ['keys' => count($deltas)],
             function () use ($deltas, &$decrPlan, &$errors): void {

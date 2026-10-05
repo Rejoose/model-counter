@@ -424,7 +424,9 @@ class SyncCountersTest extends TestCase
         $this->assertSame(['keys' => 1, 'kind' => 'zero'], $zeroReclaim['data']);
         $this->assertSame(['keys' => 1], $upsert['data']);
         $this->assertSame(['keys' => 1, 'kind' => 'drain'], $drainReclaim['data']);
-        $this->assertSame(2, $drainReclaim['depth']);
+        foreach ([$get, $zeroReclaim, $upsert, $drainReclaim] as $phase) {
+            $this->assertSame(2, $phase['depth'], $phase['op']);
+        }
 
         $this->assertSame(3, ModelCounter::valueFor($this->user, 'downloads'));
         $this->assertSame(0, (int) Redis::connection('default')->dbsize());
@@ -450,22 +452,69 @@ class SyncCountersTest extends TestCase
         $this->assertSame(0, ModelCounter::valueFor($this->user, 'downloads'));
     }
 
-    public function test_sync_propagates_failures_through_the_instrumenter(): void
+    /**
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function instrumenterFailures(): array
+    {
+        $cases = [];
+        foreach (['lock', 'scan', 'batch', 'get', 'upsert', 'reclaim'] as $op) {
+            $cases["{$op}, before the phase"] = ["counter.sync.{$op}", false];
+            $cases["{$op}, after the phase"] = ["counter.sync.{$op}", true];
+        }
+
+        return $cases;
+    }
+
+    /**
+     * @dataProvider instrumenterFailures
+     */
+    public function test_an_instrumenter_failure_never_changes_the_sync(string $op, bool $afterPhase): void
     {
         $instrumenter = new RecordingSyncInstrumenter;
+        $instrumenter->failOn = $op;
+        $instrumenter->failAfterCallback = $afterPhase;
         $this->app->instance(SyncInstrumenter::class, $instrumenter);
 
         Counter::increment($this->user, 'downloads', 3);
-        $instrumenter->failOn = 'counter.sync.reclaim';
 
         $exit = Artisan::call('counter:sync');
         $output = Artisan::output();
 
-        // The DB write is committed but the drain failed: the command keeps its
-        // existing "may double-count" handling instead of swallowing the error.
-        $this->assertSame(1, $exit, $output);
-        $this->assertStringContainsString('DECRBY pipeline failed', $output);
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString("Sync instrumenter failed on {$op}", $output);
         $this->assertSame(3, ModelCounter::valueFor($this->user, 'downloads'));
+        $this->assertSame(0, (int) Redis::connection('default')->dbsize());
+
+        // Regression: an instrumenter throwing after a committed upsert used
+        // to skip the drain, so the next sync added the delta a second time.
+        $this->app->instance(SyncInstrumenter::class, new NullSyncInstrumenter);
+        $this->assertSame(0, Artisan::call('counter:sync'));
+        $this->assertSame(3, ModelCounter::valueFor($this->user, 'downloads'));
+    }
+
+    public function test_an_exception_from_a_phase_still_propagates_through_the_instrumenter(): void
+    {
+        $command = new ExposedSyncCounters;
+        $command->setLaravel($this->app);
+        $command->setOutput(new OutputStyle(new ArrayInput([]), new BufferedOutput));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('upsert failed for real');
+
+        $command->phase('counter.sync.upsert', fn () => throw new \RuntimeException('upsert failed for real'));
+    }
+
+    public function test_the_default_instrumenter_skips_the_dbsize_round_trip(): void
+    {
+        $instrumenter = new RecordingNullSyncInstrumenter;
+        $this->app->instance(SyncInstrumenter::class, $instrumenter);
+        Counter::increment($this->user, 'downloads', 3);
+
+        $this->assertSame(0, Artisan::call('counter:sync'));
+
+        $scan = collect($instrumenter->calls)->firstWhere('op', 'counter.sync.scan');
+        $this->assertArrayNotHasKey('dbsize', $scan['data']);
     }
 
     public function test_sync_buffers_sparse_scan_pages_into_one_batch(): void
@@ -513,6 +562,87 @@ class SyncCountersTest extends TestCase
         $this->assertSame([10, 10, 5], $batches);
         $this->assertSame(25, (int) ModelCounter::query()->sum('count'));
         $this->assertSame(0, (int) Redis::connection('default')->dbsize());
+    }
+
+    /**
+     * @return array<string, array{0: int}>
+     */
+    public static function nonPositiveBatchSizes(): array
+    {
+        return ['zero' => [0], 'negative' => [-5]];
+    }
+
+    /**
+     * @dataProvider nonPositiveBatchSizes
+     */
+    public function test_sync_treats_a_batch_size_below_one_as_one(int $size): void
+    {
+        // Without the clamp the batch buffer never drains and sync hangs.
+        config(['counter.sync_batch_size' => $size]);
+        $instrumenter = new RecordingSyncInstrumenter;
+        $this->app->instance(SyncInstrumenter::class, $instrumenter);
+
+        for ($i = 0; $i < 3; $i++) {
+            Counter::increment($this->user, "k{$i}", 2);
+        }
+
+        $this->assertSame(0, Artisan::call('counter:sync'));
+
+        $this->assertSame([1, 1, 1], collect($instrumenter->calls)->where('op', 'counter.sync.batch')->pluck('data.keys')->values()->all());
+        $this->assertSame(6, (int) ModelCounter::query()->sum('count'));
+    }
+
+    public function test_sync_adds_no_empty_batch_when_keys_fill_whole_batches(): void
+    {
+        config(['counter.sync_batch_size' => 10]);
+        $instrumenter = new RecordingSyncInstrumenter;
+        $this->app->instance(SyncInstrumenter::class, $instrumenter);
+
+        for ($i = 0; $i < 20; $i++) {
+            Counter::increment($this->user, "k{$i}", 1);
+        }
+
+        $this->assertSame(0, Artisan::call('counter:sync'));
+
+        $this->assertSame([10, 10], collect($instrumenter->calls)->where('op', 'counter.sync.batch')->pluck('data.keys')->values()->all());
+    }
+
+    public function test_dry_run_across_buffered_batches_writes_nothing(): void
+    {
+        config(['counter.sync_batch_size' => 10]);
+
+        for ($i = 0; $i < 25; $i++) {
+            Counter::increment($this->user, "k{$i}", 1);
+        }
+
+        $exit = Artisan::call('counter:sync', ['--dry-run' => true]);
+        $output = Artisan::output();
+
+        $this->assertSame(0, $exit, $output);
+        $this->assertMatchesRegularExpression('/Synced\s*\|\s*25\b/', $output);
+        $this->assertSame(0, ModelCounter::query()->count());
+        $this->assertSame(25, (int) Redis::connection('default')->dbsize());
+    }
+
+    public function test_invalid_keys_in_a_buffered_batch_do_not_block_the_valid_ones(): void
+    {
+        config(['counter.sync_batch_size' => 10]);
+
+        for ($i = 0; $i < 12; $i++) {
+            Counter::increment($this->user, "k{$i}", 1);
+        }
+        $prefix = 'testprefix_cache_'.config('counter.prefix');
+        Redis::connection('default')->set($prefix.'too-short', 5);
+        Redis::connection('default')->set($prefix.'no.such.model:1:views', 5);
+
+        $exit = Artisan::call('counter:sync');
+        $output = Artisan::output();
+
+        $this->assertSame(1, $exit, $output);
+        $this->assertMatchesRegularExpression('/Errors\s*\|\s*2\b/', $output);
+        $this->assertSame(12, (int) ModelCounter::query()->sum('count'));
+        // The unparseable keys stay put for someone to inspect.
+        $this->assertSame(2, (int) Redis::connection('default')->dbsize());
     }
 
     public function test_sync_counts_a_key_scan_returns_twice_only_once(): void
@@ -576,6 +706,11 @@ class ExposedSyncCounters extends SyncCounters
 
         return [$synced, $errors];
     }
+
+    public function phase(string $op, Closure $callback): mixed
+    {
+        return $this->measurePhase($op, [], $callback);
+    }
 }
 
 /**
@@ -610,23 +745,48 @@ class RecordingSyncInstrumenter implements SyncInstrumenter
 
     public ?string $failOn = null;
 
+    /** Throw after running the callback instead of before it. */
+    public bool $failAfterCallback = false;
+
     private int $depth = 0;
 
     public function measure(string $op, array $data, Closure $callback): mixed
     {
         $this->calls[] = ['op' => $op, 'data' => $data, 'depth' => $this->depth];
 
-        if ($op === $this->failOn) {
+        if ($op === $this->failOn && ! $this->failAfterCallback) {
             throw new \RuntimeException("{$op} failed");
         }
 
         $this->depth++;
 
         try {
-            return $callback();
+            $result = $callback();
         } finally {
             $this->depth--;
         }
+
+        if ($op === $this->failOn) {
+            throw new \RuntimeException("{$op} failed after the phase");
+        }
+
+        return $result;
+    }
+}
+
+/**
+ * Counts as the default (no-op) instrumenter, but records what it is given.
+ */
+class RecordingNullSyncInstrumenter extends NullSyncInstrumenter
+{
+    /** @var array<int, array{op: string, data: array<string, mixed>}> */
+    public array $calls = [];
+
+    public function measure(string $op, array $data, Closure $callback): mixed
+    {
+        $this->calls[] = ['op' => $op, 'data' => $data];
+
+        return $callback();
     }
 }
 
