@@ -9,9 +9,11 @@ use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Support\Facades\Cache;
+use Rejoose\ModelCounter\Contracts\SyncInstrumenter;
 use Rejoose\ModelCounter\Counter;
 use Rejoose\ModelCounter\Enums\Interval;
 use Rejoose\ModelCounter\Events\CounterSynced;
+use Rejoose\ModelCounter\Instrumentation\NullSyncInstrumenter;
 use Rejoose\ModelCounter\Models\ModelCounter;
 
 class SyncCounters extends Command
@@ -42,8 +44,15 @@ class SyncCounters extends Command
      */
     protected array $modelClassCache = [];
 
+    /**
+     * Times each sync phase. Resolved per run from the container, so an
+     * app binding (e.g. Sentry spans) applies without overriding the command.
+     */
+    protected SyncInstrumenter $instrumenter;
+
     public function handle(): int
     {
+        $this->instrumenter = $this->laravel->make(SyncInstrumenter::class);
         $isDryRun = (bool) $this->option('dry-run');
         $pattern = $this->option('pattern');
 
@@ -84,7 +93,13 @@ class SyncCounters extends Command
         $lock = $store->lock('counter-sync-lock', (int) $this->option('lock-ttl'));
 
         try {
-            if (! $lock->get()) {
+            $acquired = $this->instrumenter->measure(
+                'counter.sync.lock',
+                ['store' => $storeName],
+                fn () => $lock->get(),
+            );
+
+            if (! $acquired) {
                 $this->warn('Another counter:sync run is in progress; skipping.');
 
                 return self::SUCCESS;
@@ -125,53 +140,40 @@ class SyncCounters extends Command
 
         $searchPattern = $wirePrefix.($pattern ? $pattern.'*' : '*');
 
-        // The initial SCAN cursor is client-specific: phpredis (>=6.x) treats
-        // 0 or "0" as "already finished" and returns false without scanning,
-        // so it must start from null — while Predis serializes null to an
-        // empty string on the wire, which Redis rejects with "ERR invalid
-        // cursor", so it must start from "0".
-        $cursor = $redis instanceof PhpRedisConnection ? null : '0';
         $totalFound = 0;
         $synced = 0;
         $skipped = 0;
         $errors = 0;
 
+        // DBSIZE is what SCAN has to walk, so it explains a slow scan. Skip
+        // the extra round trip when nothing records it.
+        $scanData = ['pattern' => $searchPattern];
+        if (! $this->instrumenter instanceof NullSyncInstrumenter) {
+            $scanData['dbsize'] = $this->dbSize($redis);
+        }
+
         // Process each SCAN batch as it comes back instead of accumulating
         // all matching keys in memory first - at scale the keyspace can be
         // in the millions and buffering all of it would blow up the sync
         // worker.
-        do {
-            $result = $redis->scan($cursor, [
-                'match' => $searchPattern,
-                'count' => $batchSize,
-            ]);
-
-            if ($result === false) {
-                break;
-            }
-
-            [$cursor, $foundKeys] = $result;
-
-            if (empty($foundKeys)) {
-                continue;
-            }
-
-            if ($totalFound === 0) {
-                $this->info('Streaming matched keys from Redis...');
-            }
-            $totalFound += count($foundKeys);
-
-            $this->processBatch(
-                $redis,
-                $foundKeys,
-                $connectionPrefix,
-                $logicalPrefix,
-                $isDryRun,
-                $synced,
-                $skipped,
-                $errors
-            );
-        } while ((string) $cursor !== '0');
+        $this->instrumenter->measure(
+            'counter.sync.scan',
+            $scanData,
+            function () use ($redis, $searchPattern, $batchSize, $connectionPrefix, $logicalPrefix, $isDryRun, &$totalFound, &$synced, &$skipped, &$errors): void {
+                $this->scanAndProcess(
+                    $redis,
+                    $searchPattern,
+                    $batchSize,
+                    $connectionPrefix,
+                    $logicalPrefix,
+                    $isDryRun,
+                    $totalFound,
+                    $synced,
+                    $skipped,
+                    $errors
+                );
+            },
+        );
 
         if ($totalFound === 0) {
             $this->info('No counters found to sync.');
@@ -199,6 +201,95 @@ class SyncCounters extends Command
         }
 
         return $errors > 0 ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * Walk the keyspace with SCAN and sync each page as it arrives.
+     */
+    protected function scanAndProcess(
+        object $redis,
+        string $searchPattern,
+        int $batchSize,
+        string $connectionPrefix,
+        string $logicalPrefix,
+        bool $isDryRun,
+        int &$totalFound,
+        int &$synced,
+        int &$skipped,
+        int &$errors
+    ): void {
+        // The initial SCAN cursor is client-specific: phpredis (>=6.x) treats
+        // 0 or "0" as "already finished" and returns false without scanning,
+        // so it must start from null — while Predis serializes null to an
+        // empty string on the wire, which Redis rejects with "ERR invalid
+        // cursor", so it must start from "0".
+        $cursor = $redis instanceof PhpRedisConnection ? null : '0';
+
+        do {
+            $result = $redis->scan($cursor, [
+                'match' => $searchPattern,
+                'count' => $batchSize,
+            ]);
+
+            if ($result === false) {
+                break;
+            }
+
+            [$cursor, $foundKeys] = $result;
+
+            if (empty($foundKeys)) {
+                continue;
+            }
+
+            if ($totalFound === 0) {
+                $this->info('Streaming matched keys from Redis...');
+            }
+            $totalFound += count($foundKeys);
+
+            $this->instrumenter->measure(
+                'counter.sync.batch',
+                ['keys' => count($foundKeys)],
+                function () use ($redis, $foundKeys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
+                    $this->processBatch(
+                        $redis,
+                        $foundKeys,
+                        $connectionPrefix,
+                        $logicalPrefix,
+                        $isDryRun,
+                        $synced,
+                        $skipped,
+                        $errors
+                    );
+                },
+            );
+        } while ((string) $cursor !== '0');
+    }
+
+    /**
+     * DBSIZE of the counter store's Redis database, or null when it can't be
+     * read. Only used as instrumentation context.
+     */
+    protected function dbSize(object $redis): ?int
+    {
+        try {
+            $size = $redis->dbsize();
+
+            return is_numeric($size) ? (int) $size : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * @param  array<int, array{0: string, 1: int}>  $plan
+     */
+    protected function measureReclaim(object $redis, array $plan, string $kind): void
+    {
+        $this->instrumenter->measure(
+            'counter.sync.reclaim',
+            ['keys' => count($plan), 'kind' => $kind],
+            fn () => $this->pipelineDecrBy($redis, $plan),
+        );
     }
 
     /**
@@ -301,7 +392,11 @@ class SyncCounters extends Command
         // to per-key GETs so the offending key can be isolated and the
         // batch can continue.
         try {
-            $values = $this->pipelineGet($redis, $rawKeysToRead);
+            $values = $this->instrumenter->measure(
+                'counter.sync.get',
+                ['keys' => count($rawKeysToRead)],
+                fn () => $this->pipelineGet($redis, $rawKeysToRead),
+            );
         } catch (\Throwable $e) {
             $this->warn('GET pipeline failed, falling back to per-key reads: '.$e->getMessage());
 
@@ -374,7 +469,7 @@ class SyncCounters extends Command
         // after the GET makes the value non-zero, so the key is kept.
         if ($zeroPlan !== [] && ! $isDryRun) {
             try {
-                $this->pipelineDecrBy($redis, $zeroPlan);
+                $this->measureReclaim($redis, $zeroPlan, 'zero');
             } catch (\Throwable $e) {
                 $this->warn('Zero-key reclaim failed, retrying next sync: '.$e->getMessage());
             }
@@ -395,44 +490,50 @@ class SyncCounters extends Command
         // path. On SQL failure we re-run per-row so a single bad row
         // doesn't fail the entire batch - matches the previous
         // try/catch-per-key behaviour.
-        try {
-            if (ModelCounter::supportsBulkAddDelta()) {
-                ModelCounter::bulkAddDelta($deltas);
-            } else {
-                foreach ($deltas as $delta) {
-                    ModelCounter::addDeltaRaw(
-                        $delta['owner_type'],
-                        $delta['owner_id'],
-                        $delta['key'],
-                        $delta['amount'],
-                        $delta['interval'] !== null ? Interval::from($delta['interval']) : null,
-                        $delta['period_start'] !== null ? Carbon::parse($delta['period_start']) : null,
-                    );
-                }
-            }
-        } catch (\Throwable $bulkError) {
-            $this->warn('Bulk upsert failed, retrying per row: '.$bulkError->getMessage());
-            $localErrors = 0;
-
-            foreach ($deltas as $idx => $delta) {
+        $this->instrumenter->measure(
+            'counter.sync.upsert',
+            ['keys' => count($deltas)],
+            function () use ($deltas, &$decrPlan, &$errors): void {
                 try {
-                    ModelCounter::addDeltaRaw(
-                        $delta['owner_type'],
-                        $delta['owner_id'],
-                        $delta['key'],
-                        $delta['amount'],
-                        $delta['interval'] !== null ? Interval::from($delta['interval']) : null,
-                        $delta['period_start'] !== null ? Carbon::parse($delta['period_start']) : null,
-                    );
-                } catch (\Throwable $e) {
-                    $this->error("Error syncing {$delta['owner_type']}#{$delta['owner_id']}[{$delta['key']}]: ".$e->getMessage());
-                    unset($decrPlan[$idx]);
-                    $localErrors++;
-                }
-            }
+                    if (ModelCounter::supportsBulkAddDelta()) {
+                        ModelCounter::bulkAddDelta($deltas);
+                    } else {
+                        foreach ($deltas as $delta) {
+                            ModelCounter::addDeltaRaw(
+                                $delta['owner_type'],
+                                $delta['owner_id'],
+                                $delta['key'],
+                                $delta['amount'],
+                                $delta['interval'] !== null ? Interval::from($delta['interval']) : null,
+                                $delta['period_start'] !== null ? Carbon::parse($delta['period_start']) : null,
+                            );
+                        }
+                    }
+                } catch (\Throwable $bulkError) {
+                    $this->warn('Bulk upsert failed, retrying per row: '.$bulkError->getMessage());
+                    $localErrors = 0;
 
-            $errors += $localErrors;
-        }
+                    foreach ($deltas as $idx => $delta) {
+                        try {
+                            ModelCounter::addDeltaRaw(
+                                $delta['owner_type'],
+                                $delta['owner_id'],
+                                $delta['key'],
+                                $delta['amount'],
+                                $delta['interval'] !== null ? Interval::from($delta['interval']) : null,
+                                $delta['period_start'] !== null ? Carbon::parse($delta['period_start']) : null,
+                            );
+                        } catch (\Throwable $e) {
+                            $this->error("Error syncing {$delta['owner_type']}#{$delta['owner_id']}[{$delta['key']}]: ".$e->getMessage());
+                            unset($decrPlan[$idx]);
+                            $localErrors++;
+                        }
+                    }
+
+                    $errors += $localErrors;
+                }
+            },
+        );
 
         // Phase 5: pipeline the atomic drain-and-reclaim (DECRBY + DEL-if-zero).
         // Rows are already committed to the DB, so a failure here means "synced
@@ -441,7 +542,7 @@ class SyncCounters extends Command
         // rather than rolling back the (already-durable) DB writes.
         if ($decrPlan !== []) {
             try {
-                $this->pipelineDecrBy($redis, array_values($decrPlan));
+                $this->measureReclaim($redis, array_values($decrPlan), 'drain');
             } catch (\Throwable $e) {
                 $this->warn('DECRBY pipeline failed (DB already committed, may double-count next sync): '.$e->getMessage());
                 $errors += count($decrPlan);

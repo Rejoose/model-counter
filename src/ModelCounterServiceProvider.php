@@ -8,7 +8,9 @@ use Illuminate\Support\ServiceProvider;
 use Rejoose\ModelCounter\Console\PruneCounters;
 use Rejoose\ModelCounter\Console\RecountCounters;
 use Rejoose\ModelCounter\Console\SyncCounters;
+use Rejoose\ModelCounter\Contracts\SyncInstrumenter;
 use Rejoose\ModelCounter\Enums\Interval;
+use Rejoose\ModelCounter\Instrumentation\NullSyncInstrumenter;
 use Rejoose\ModelCounter\Traits\HasCounters;
 
 class ModelCounterServiceProvider extends ServiceProvider
@@ -22,6 +24,9 @@ class ModelCounterServiceProvider extends ServiceProvider
             __DIR__.'/../config/counter.php',
             'counter'
         );
+
+        // bindIf, so an app binding wins whichever provider registers first.
+        $this->app->bindIf(SyncInstrumenter::class, NullSyncInstrumenter::class);
     }
 
     /**
