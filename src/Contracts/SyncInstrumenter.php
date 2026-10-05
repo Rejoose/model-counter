@@ -20,8 +20,13 @@ interface SyncInstrumenter
 {
     /**
      * @param  string  $op  Phase name, e.g. `counter.sync.batch`.
-     * @param  array<string, mixed>  $data  Context such as `keys` (keys in
-     *                                      this phase) and `dbsize`.
+     * @param  array<string, mixed>  $data  Context: `keys` (keys in this
+     *                                      phase) on batch, get, upsert and
+     *                                      reclaim; `kind` (`drain` or `zero`)
+     *                                      on reclaim; `store` on lock;
+     *                                      `pattern` and `dbsize` (int or null;
+     *                                      only read when a non-default
+     *                                      instrumenter is bound) on scan.
      */
     public function measure(string $op, array $data, Closure $callback): mixed;
 }

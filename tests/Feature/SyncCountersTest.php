@@ -569,7 +569,7 @@ class ExposedSyncCounters extends SyncCounters
      */
     public function scan(object $redis, string $logicalPrefix): array
     {
-        $this->instrumenter = new NullSyncInstrumenter;
+        // No handle(): the sync methods must fall back to the bound instrumenter.
         $totalFound = $synced = $skipped = $errors = 0;
 
         $this->scanAndProcess($redis, $logicalPrefix.'*', 100, '', $logicalPrefix, false, $totalFound, $synced, $skipped, $errors);

@@ -48,7 +48,7 @@ class SyncCounters extends Command
      * Times each sync phase. Resolved per run from the container, so an
      * app binding (e.g. Sentry spans) applies without overriding the command.
      */
-    protected SyncInstrumenter $instrumenter;
+    protected ?SyncInstrumenter $instrumenter = null;
 
     public function handle(): int
     {
@@ -94,7 +94,7 @@ class SyncCounters extends Command
         $lock = $store->lock('counter-sync-lock', (int) $this->option('lock-ttl'));
 
         try {
-            $acquired = $this->instrumenter->measure(
+            $acquired = $this->instrumenter()->measure(
                 'counter.sync.lock',
                 ['store' => $storeName],
                 fn () => $lock->get(),
@@ -118,6 +118,16 @@ class SyncCounters extends Command
         } finally {
             optional($lock)->release();
         }
+    }
+
+    /**
+     * The instrumenter for this run. handle() resolves a fresh one per run;
+     * this falls back to the container when a subclass or a
+     * test calls the sync methods without going through handle().
+     */
+    protected function instrumenter(): SyncInstrumenter
+    {
+        return $this->instrumenter ??= $this->laravel->make(SyncInstrumenter::class);
     }
 
     protected function runSync(
@@ -149,15 +159,14 @@ class SyncCounters extends Command
         // DBSIZE is what SCAN has to walk, so it explains a slow scan. Skip
         // the extra round trip when nothing records it.
         $scanData = ['pattern' => $searchPattern];
-        if (! $this->instrumenter instanceof NullSyncInstrumenter) {
+        if (! $this->instrumenter() instanceof NullSyncInstrumenter) {
             $scanData['dbsize'] = $this->dbSize($redis);
         }
 
-        // Process each SCAN batch as it comes back instead of accumulating
-        // all matching keys in memory first - at scale the keyspace can be
-        // in the millions and buffering all of it would blow up the sync
-        // worker.
-        $this->instrumenter->measure(
+        // Sync in batches as SCAN pages come back instead of collecting all
+        // matching keys first - at scale the keyspace can be in the millions
+        // and holding all of it would blow up the sync worker.
+        $this->instrumenter()->measure(
             'counter.sync.scan',
             $scanData,
             function () use ($redis, $searchPattern, $batchSize, $connectionPrefix, $logicalPrefix, $isDryRun, &$totalFound, &$synced, &$skipped, &$errors): void {
@@ -289,7 +298,7 @@ class SyncCounters extends Command
         int &$skipped,
         int &$errors
     ): void {
-        $this->instrumenter->measure(
+        $this->instrumenter()->measure(
             'counter.sync.batch',
             ['keys' => count($keys)],
             function () use ($redis, $keys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
@@ -327,7 +336,7 @@ class SyncCounters extends Command
      */
     protected function measureReclaim(object $redis, array $plan, string $kind): void
     {
-        $this->instrumenter->measure(
+        $this->instrumenter()->measure(
             'counter.sync.reclaim',
             ['keys' => count($plan), 'kind' => $kind],
             fn () => $this->pipelineDecrBy($redis, $plan),
@@ -434,7 +443,7 @@ class SyncCounters extends Command
         // to per-key GETs so the offending key can be isolated and the
         // batch can continue.
         try {
-            $values = $this->instrumenter->measure(
+            $values = $this->instrumenter()->measure(
                 'counter.sync.get',
                 ['keys' => count($rawKeysToRead)],
                 fn () => $this->pipelineGet($redis, $rawKeysToRead),
@@ -532,7 +541,7 @@ class SyncCounters extends Command
         // path. On SQL failure we re-run per-row so a single bad row
         // doesn't fail the entire batch - matches the previous
         // try/catch-per-key behaviour.
-        $this->instrumenter->measure(
+        $this->instrumenter()->measure(
             'counter.sync.upsert',
             ['keys' => count($deltas)],
             function () use ($deltas, &$decrPlan, &$errors): void {

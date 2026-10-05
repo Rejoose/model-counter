@@ -689,6 +689,7 @@ php artisan counter:sync --pattern="user:*"
 `counter:sync` passes each phase through `Rejoose\ModelCounter\Contracts\SyncInstrumenter`. The package binds a no-op, so nothing is recorded by default. Bind your own implementation to time the phases, for example as Sentry spans:
 
 ```php
+use Closure;
 use Rejoose\ModelCounter\Contracts\SyncInstrumenter;
 use Sentry\Tracing\SpanContext;
 
