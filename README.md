@@ -708,7 +708,7 @@ $this->app->bind(SyncInstrumenter::class, SentrySyncInstrumenter::class);
 |----|-------|------|
 | `counter.sync.lock` | Acquiring the overlap lock | `store` |
 | `counter.sync.scan` | The whole `SCAN` loop, including every batch | `pattern`, `dbsize` |
-| `counter.sync.batch` | One `SCAN` page | `keys` |
+| `counter.sync.batch` | One batch of up to `sync_batch_size` keys, buffered across `SCAN` pages | `keys` |
 | `counter.sync.get` | The pipelined `GET`s | `keys` |
 | `counter.sync.upsert` | The bulk DB upsert | `keys` |
 | `counter.sync.reclaim` | The pipelined `DECRBY` + `DEL`-if-zero | `keys`, `kind` (`drain` or `zero`) |

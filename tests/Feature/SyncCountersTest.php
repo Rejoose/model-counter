@@ -3,6 +3,7 @@
 namespace Rejoose\ModelCounter\Tests\Feature;
 
 use Closure;
+use Illuminate\Console\OutputStyle;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Carbon;
@@ -17,6 +18,8 @@ use Rejoose\ModelCounter\Instrumentation\NullSyncInstrumenter;
 use Rejoose\ModelCounter\Models\ModelCounter;
 use Rejoose\ModelCounter\Tests\TestCase;
 use Rejoose\ModelCounter\Traits\HasCounters;
+use Symfony\Component\Console\Input\ArrayInput;
+use Symfony\Component\Console\Output\BufferedOutput;
 
 class SyncCountersTest extends TestCase
 {
@@ -465,6 +468,79 @@ class SyncCountersTest extends TestCase
         $this->assertSame(3, ModelCounter::valueFor($this->user, 'downloads'));
     }
 
+    public function test_sync_buffers_sparse_scan_pages_into_one_batch(): void
+    {
+        config(['counter.sync_batch_size' => 100]);
+        $instrumenter = new RecordingSyncInstrumenter;
+        $this->app->instance(SyncInstrumenter::class, $instrumenter);
+
+        // Unrelated keys in the same database spread the counter keys thinly
+        // across SCAN pages, as on a store shared with the app cache.
+        Redis::connection('default')->pipeline(function ($pipe): void {
+            for ($i = 0; $i < 500; $i++) {
+                $pipe->set("unrelated:{$i}", 'x');
+            }
+        });
+        for ($i = 0; $i < 30; $i++) {
+            Counter::increment($this->user, "k{$i}", 2);
+        }
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+
+        $ops = collect($instrumenter->calls);
+        $this->assertSame([['keys' => 30]], $ops->where('op', 'counter.sync.batch')->pluck('data')->values()->all());
+        $this->assertSame([['keys' => 30]], $ops->where('op', 'counter.sync.upsert')->pluck('data')->values()->all());
+        $this->assertSame(2, ModelCounter::valueFor($this->user, 'k0'));
+        $this->assertSame(2, ModelCounter::valueFor($this->user, 'k29'));
+        $this->assertSame(500, (int) Redis::connection('default')->dbsize());
+    }
+
+    public function test_sync_splits_buffered_keys_into_batches_of_the_configured_size(): void
+    {
+        config(['counter.sync_batch_size' => 10]);
+        $instrumenter = new RecordingSyncInstrumenter;
+        $this->app->instance(SyncInstrumenter::class, $instrumenter);
+
+        for ($i = 0; $i < 25; $i++) {
+            Counter::increment($this->user, "k{$i}", 1);
+        }
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+
+        $batches = collect($instrumenter->calls)->where('op', 'counter.sync.batch')->pluck('data.keys')->values()->all();
+        $this->assertSame([10, 10, 5], $batches);
+        $this->assertSame(25, (int) ModelCounter::query()->sum('count'));
+        $this->assertSame(0, (int) Redis::connection('default')->dbsize());
+    }
+
+    public function test_sync_counts_a_key_scan_returns_twice_only_once(): void
+    {
+        Counter::increment($this->user, 'views', 3);
+        Counter::increment($this->user, 'clicks', 4);
+
+        $views = 'testprefix_cache_'.Counter::redisKey($this->user, 'views');
+        $clicks = 'testprefix_cache_'.Counter::redisKey($this->user, 'clicks');
+
+        // SCAN may return a key again on a later page. With pages buffered,
+        // both copies would otherwise land in the same batch.
+        $redis = new ScriptedScanConnection(Redis::connection('default'), [
+            ['7', [$views]],
+            ['0', [$views, $clicks]],
+        ]);
+
+        $command = new ExposedSyncCounters;
+        $command->setLaravel($this->app);
+        $command->setOutput(new OutputStyle(new ArrayInput([]), new BufferedOutput));
+        [$synced, $errors] = $command->scan($redis, 'testprefix_cache_'.config('counter.prefix'));
+
+        $this->assertSame(2, $synced);
+        $this->assertSame(0, $errors);
+        $this->assertSame(3, ModelCounter::valueFor($this->user, 'views'));
+        $this->assertSame(4, ModelCounter::valueFor($this->user, 'clicks'));
+    }
+
     public function test_the_default_instrumenter_is_a_no_op(): void
     {
         $this->assertInstanceOf(NullSyncInstrumenter::class, $this->app->make(SyncInstrumenter::class));
@@ -480,6 +556,50 @@ class SyncCountersTest extends TestCase
         $this->assertSame(0, ModelCounter::valueFor($this->user, 'clicks'));
         $this->assertSame(0, (int) Redis::connection('default')->dbsize());
         $this->assertSame('result', (new NullSyncInstrumenter)->measure('op', [], fn () => 'result'));
+    }
+}
+
+/**
+ * Runs the command's SCAN loop directly, so a test can feed it scripted pages.
+ */
+class ExposedSyncCounters extends SyncCounters
+{
+    /**
+     * @return array{0: int, 1: int} synced, errors
+     */
+    public function scan(object $redis, string $logicalPrefix): array
+    {
+        $this->instrumenter = new NullSyncInstrumenter;
+        $totalFound = $synced = $skipped = $errors = 0;
+
+        $this->scanAndProcess($redis, $logicalPrefix.'*', 100, '', $logicalPrefix, false, $totalFound, $synced, $skipped, $errors);
+
+        return [$synced, $errors];
+    }
+}
+
+/**
+ * Returns scripted SCAN pages and passes every other call to a real connection.
+ * It has no pipeline() method, so the command takes its per-key paths.
+ */
+class ScriptedScanConnection
+{
+    /**
+     * @param  array<int, array{0: string, 1: array<int, string>}>  $pages
+     */
+    public function __construct(private object $connection, private array $pages) {}
+
+    /**
+     * @return array{0: string, 1: array<int, string>}|false
+     */
+    public function scan(mixed $cursor, array $options = []): array|false
+    {
+        return array_shift($this->pages) ?? false;
+    }
+
+    public function __call(string $method, array $args): mixed
+    {
+        return $this->connection->{$method}(...$args);
     }
 }
 

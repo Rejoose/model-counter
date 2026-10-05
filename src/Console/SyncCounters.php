@@ -60,7 +60,8 @@ class SyncCounters extends Command
         $repository = Cache::store($storeName);
         $store = $repository->getStore();
         $counterPrefix = (string) config('counter.prefix');
-        $batchSize = (int) config('counter.sync_batch_size', 1000);
+        // At least 1: the batch buffer below flushes on count >= $batchSize.
+        $batchSize = max(1, (int) config('counter.sync_batch_size', 1000));
 
         if ($storeName === 'array') {
             $this->info('Using array cache store - sync is not needed.');
@@ -225,6 +226,18 @@ class SyncCounters extends Command
         // cursor", so it must start from "0".
         $cursor = $redis instanceof PhpRedisConnection ? null : '0';
 
+        // SCAN's COUNT is a hint for how many slots to walk, not how many
+        // keys match. In a database shared with other keys most pages hold a
+        // handful of counter keys, and syncing page by page then pays a full
+        // GET/upsert/reclaim round trip for each handful. Buffer matches
+        // across pages and sync them in batches of $batchSize instead.
+        //
+        // Keyed by wire key: SCAN may return a key more than once, and the
+        // same key twice in one batch would be read and upserted twice. A
+        // duplicate in a later batch is harmless, since by then the key has
+        // been drained and reads back as 0 or missing.
+        $buffer = [];
+
         do {
             $result = $redis->scan($cursor, [
                 'match' => $searchPattern,
@@ -246,23 +259,52 @@ class SyncCounters extends Command
             }
             $totalFound += count($foundKeys);
 
-            $this->instrumenter->measure(
-                'counter.sync.batch',
-                ['keys' => count($foundKeys)],
-                function () use ($redis, $foundKeys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
-                    $this->processBatch(
-                        $redis,
-                        $foundKeys,
-                        $connectionPrefix,
-                        $logicalPrefix,
-                        $isDryRun,
-                        $synced,
-                        $skipped,
-                        $errors
-                    );
-                },
-            );
+            foreach ($foundKeys as $wireKey) {
+                $buffer[$wireKey] = true;
+            }
+
+            while (count($buffer) >= $batchSize) {
+                $batch = array_slice($buffer, 0, $batchSize, true);
+                $buffer = array_slice($buffer, $batchSize, null, true);
+
+                $this->measureBatch(array_map('strval', array_keys($batch)), $redis, $connectionPrefix, $logicalPrefix, $isDryRun, $synced, $skipped, $errors);
+            }
         } while ((string) $cursor !== '0');
+
+        if ($buffer !== []) {
+            $this->measureBatch(array_map('strval', array_keys($buffer)), $redis, $connectionPrefix, $logicalPrefix, $isDryRun, $synced, $skipped, $errors);
+        }
+    }
+
+    /**
+     * @param  array<int, string>  $keys
+     */
+    protected function measureBatch(
+        array $keys,
+        object $redis,
+        string $connectionPrefix,
+        string $logicalPrefix,
+        bool $isDryRun,
+        int &$synced,
+        int &$skipped,
+        int &$errors
+    ): void {
+        $this->instrumenter->measure(
+            'counter.sync.batch',
+            ['keys' => count($keys)],
+            function () use ($redis, $keys, $connectionPrefix, $logicalPrefix, $isDryRun, &$synced, &$skipped, &$errors): void {
+                $this->processBatch(
+                    $redis,
+                    $keys,
+                    $connectionPrefix,
+                    $logicalPrefix,
+                    $isDryRun,
+                    $synced,
+                    $skipped,
+                    $errors
+                );
+            },
+        );
     }
 
     /**
