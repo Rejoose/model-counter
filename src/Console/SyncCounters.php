@@ -328,12 +328,21 @@ class SyncCounters extends Command
         // Phase 3: build the batched delta payload and the DECRBY plan.
         $deltas = [];
         $decrPlan = [];
+        $zeroPlan = [];
 
         foreach ($parsedRows as $i => $row) {
             $value = (int) ($values[$i] ?? 0);
 
             if ($value === 0) {
                 $skipped++;
+
+                // A key that netted back to exactly zero (increment then
+                // decrement before a sync) has nothing to sync, but without a
+                // reclaim it lingers and every later SCAN walks it. Missing and
+                // non-numeric values are left alone.
+                if ((string) ($values[$i] ?? '') === '0') {
+                    $zeroPlan[] = [$row['raw_key'], 0];
+                }
 
                 continue;
             }
@@ -358,6 +367,16 @@ class SyncCounters extends Command
                 // the log mirrors the `global:0` wire token.
                 $ownerIdLabel = $row['db_owner_id'] ?? '0';
                 $this->line("  ✓ {$ownerLabel}#{$ownerIdLabel} [{$parsed['counter_key']}]{$intervalInfo} += {$value}");
+            }
+        }
+
+        // DECRBY 0 + DEL-if-zero in the reclaim script: a write that lands
+        // after the GET makes the value non-zero, so the key is kept.
+        if ($zeroPlan !== [] && ! $isDryRun) {
+            try {
+                $this->pipelineDecrBy($redis, $zeroPlan);
+            } catch (\Throwable $e) {
+                $this->warn('Zero-key reclaim failed, retrying next sync: '.$e->getMessage());
             }
         }
 

@@ -241,6 +241,34 @@ class SyncCountersTest extends TestCase
         $this->assertSame(0, (int) Redis::connection('default')->exists($fullKey));
     }
 
+    public function test_sync_reclaims_keys_that_net_to_zero_before_a_sync(): void
+    {
+        Counter::increment($this->user, 'clicks', 4);
+        Counter::decrement($this->user, 'clicks', 4);
+
+        $fullKey = 'testprefix_cache_'.Counter::redisKey($this->user, 'clicks');
+        $this->assertSame('0', (string) Redis::connection('default')->get($fullKey));
+
+        $exit = Artisan::call('counter:sync');
+        $this->assertSame(0, $exit, Artisan::output());
+
+        $this->assertSame(0, ModelCounter::valueFor($this->user, 'clicks'));
+        $this->assertSame(0, (int) Redis::connection('default')->exists($fullKey));
+    }
+
+    public function test_sync_keeps_a_zero_key_on_dry_run(): void
+    {
+        Counter::increment($this->user, 'clicks', 4);
+        Counter::decrement($this->user, 'clicks', 4);
+
+        $fullKey = 'testprefix_cache_'.Counter::redisKey($this->user, 'clicks');
+
+        $exit = Artisan::call('counter:sync', ['--dry-run' => true]);
+        $this->assertSame(0, $exit, Artisan::output());
+
+        $this->assertSame(1, (int) Redis::connection('default')->exists($fullKey));
+    }
+
     public function test_get_many_reads_batched_redis_deltas(): void
     {
         // Regression: getMany() built prefix-less keys and handed them to a raw
