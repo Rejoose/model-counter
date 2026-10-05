@@ -46,13 +46,16 @@ jobs:
           composer update --${{ matrix.dependency-version }} --prefer-dist --no-interaction
 
       - name: Execute tests
-        run: vendor/bin/pest --coverage
+        run: vendor/bin/pest --coverage --coverage-clover coverage.xml
         env:
           REDIS_HOST: localhost
           REDIS_PORT: 6379
 
+      # Coverage is informational: a Codecov outage (e.g. the 2026-10-05 TLS
+      # handshake failures) must not fail the job and fail-fast-cancel the matrix.
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
         if: matrix.php == '8.3' && matrix.laravel == '13.*' && matrix.dependency-version == 'prefer-stable'
         with:
           files: ./coverage.xml

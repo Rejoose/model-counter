@@ -62,6 +62,30 @@ REDIS_PASSWORD=null
 REDIS_PORT=6379
 ```
 
+**Give the counter store its own Redis database.** `counter:sync` uses `SCAN`, which walks every key in the database, not just counter keys. On a database shared with a large application cache, each sync walks the whole cache, and a `cache:clear` on that store also deletes unsynced deltas. Add a dedicated connection and cache store:
+
+```php
+// config/database.php → 'redis'
+'counters' => [
+    'url' => env('REDIS_URL'),
+    'host' => env('REDIS_HOST', '127.0.0.1'),
+    'password' => env('REDIS_PASSWORD'),
+    'port' => env('REDIS_PORT', '6379'),
+    'database' => env('REDIS_COUNTER_DB', '3'),
+],
+
+// config/cache.php → 'stores'
+'counters' => [
+    'driver' => 'redis',
+    'connection' => 'counters',
+    'lock_connection' => 'counters',
+],
+```
+
+```env
+COUNTER_STORE=counters
+```
+
 ### Step 5: Schedule Counter Sync
 
 Add this to your `routes/console.php`:
@@ -659,6 +683,37 @@ php artisan counter:sync --dry-run
 # Sync specific pattern
 php artisan counter:sync --pattern="user:*"
 ```
+
+### Instrumenting Sync
+
+`counter:sync` passes each phase through `Rejoose\ModelCounter\Contracts\SyncInstrumenter`. The package binds a no-op, so nothing is recorded by default. Bind your own implementation to time the phases, for example as Sentry spans:
+
+```php
+use Rejoose\ModelCounter\Contracts\SyncInstrumenter;
+use Sentry\Tracing\SpanContext;
+
+class SentrySyncInstrumenter implements SyncInstrumenter
+{
+    public function measure(string $op, array $data, Closure $callback): mixed
+    {
+        return \Sentry\trace($callback, SpanContext::make()->setOp($op)->setData($data));
+    }
+}
+
+// AppServiceProvider::register()
+$this->app->bind(SyncInstrumenter::class, SentrySyncInstrumenter::class);
+```
+
+| Op | Wraps | Data |
+|----|-------|------|
+| `counter.sync.lock` | Acquiring the overlap lock | `store` |
+| `counter.sync.scan` | The whole `SCAN` loop, including every batch | `pattern`, `dbsize` |
+| `counter.sync.batch` | One `SCAN` page | `keys` |
+| `counter.sync.get` | The pipelined `GET`s | `keys` |
+| `counter.sync.upsert` | The bulk DB upsert | `keys` |
+| `counter.sync.reclaim` | The pipelined `DECRBY` + `DEL`-if-zero | `keys`, `kind` (`drain` or `zero`) |
+
+`dbsize` is only read when a non-default instrumenter is bound. An implementation must call the callback once, return its result and let exceptions propagate.
 
 ## 🧹 Pruning Old Records
 

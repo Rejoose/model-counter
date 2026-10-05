@@ -2,6 +2,18 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.6.0] - 2026-10-05
+
+### Added
+- **`counter:sync` instrumentation hook.** New `Rejoose\ModelCounter\Contracts\SyncInstrumenter` with `measure(string $op, array $data, Closure $callback): mixed`. Sync passes the lock acquire (`counter.sync.lock`), the `SCAN` loop (`counter.sync.scan`, with `dbsize`), each batch (`counter.sync.batch`), the `GET` pipeline (`counter.sync.get`), the bulk upsert (`counter.sync.upsert`) and the reclaim pipeline (`counter.sync.reclaim`, `kind` `drain` or `zero`) through it, with the key count as `keys`. The service provider binds a no-op `NullSyncInstrumenter` with `bindIf`, so an app binding wins. It is a container binding, not a static, so it is Octane-safe. The package has no tracing dependency; see the README for a ~10-line Sentry implementation.
+
+### Changed
+- The `SCAN` loop moved from `SyncCounters::runSync()` into a new protected `scanAndProcess()`. Subclasses that override `runSync()` keep working but skip the `scan` and `batch` spans.
+- Removed the `"version"` field from `composer.json`. Composer takes the version from the git tag; a stale field made Composer skip the 2.5.1 tag.
+
+### Docs
+- README: recommend a dedicated Redis database for the counter store, with an example connection and cache store.
+
 ## [2.5.1] - 2026-10-05
 
 ### Fixed
