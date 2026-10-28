@@ -2,6 +2,11 @@
 
 All notable changes to `model-counter` will be documented in this file.
 
+## [2.6.2] - 2026-10-28
+
+### Security
+- **Requires `illuminate/*` `^13.29`.** Laravel below 13.29.0 is affected by CVE-2026-114509, an authentication bypass in which an unauthenticated attacker can authenticate as another user without that user's API token. With the old `^13.0` constraint, an app could install this package and stay on a vulnerable Laravel. Composer now refuses to install 2.6.2 alongside one.
+
 ## [2.6.1] - 2026-10-05
 
 ### Fixed

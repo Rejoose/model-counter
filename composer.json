@@ -18,9 +18,9 @@
     ],
     "require": {
         "php": "^8.3",
-        "illuminate/support": "^13.0",
-        "illuminate/database": "^13.0",
-        "illuminate/redis": "^13.0"
+        "illuminate/support": "^13.29",
+        "illuminate/database": "^13.29",
+        "illuminate/redis": "^13.29"
     },
     "require-dev": {
         "larastan/larastan": "^3.0",
